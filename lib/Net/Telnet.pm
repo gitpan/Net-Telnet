@@ -1,15 +1,34 @@
 package Net::Telnet;
 require 5.002;
 
-## User documentation in POD format at bottom of file.  Search for =head
+## User documentation in POD format is at end of this file.  Search for =head
 
 use strict;
 
-## Module import. 
+## Module export.
+use vars qw(@EXPORT_OK);
+@EXPORT_OK = qw(TELNET_IAC TELNET_DONT TELNET_DO TELNET_WONT TELNET_WILL
+		TELNET_SB TELNET_GA TELNET_EL TELNET_EC TELNET_AYT TELNET_AO
+		TELNET_IP TELNET_BREAK TELNET_DM TELNET_NOP TELNET_SE
+		TELNET_EOR TELNET_ABORT TELNET_SUSP TELNET_EOF TELNET_SYNCH
+		TELOPT_BINARY TELOPT_ECHO TELOPT_RCP TELOPT_SGA TELOPT_NAMS
+		TELOPT_STATUS TELOPT_TM TELOPT_RCTE TELOPT_NAOL TELOPT_NAOP
+		TELOPT_NAOCRD TELOPT_NAOHTS TELOPT_NAOHTD TELOPT_NAOFFD
+		TELOPT_NAOVTS TELOPT_NAOVTD TELOPT_NAOLFD TELOPT_XASCII
+		TELOPT_LOGOUT TELOPT_BM TELOPT_DET TELOPT_SUPDUP
+		TELOPT_SUPDUPOUTPUT TELOPT_SNDLOC TELOPT_TTYPE TELOPT_EOR
+		TELOPT_TUID TELOPT_OUTMRK TELOPT_TTYLOC TELOPT_3270REGIME
+		TELOPT_X3PAD TELOPT_NAWS TELOPT_TSPEED TELOPT_LFLOW
+		TELOPT_LINEMODE TELOPT_XDISPLOC TELOPT_OLD_ENVIRON
+		TELOPT_AUTHENTICATION TELOPT_ENCRYPT TELOPT_NEW_ENVIRON
+		TELOPT_EXOPL);
+
+## Module import.
 use Exporter ();
 use Socket qw(AF_INET SOCK_STREAM inet_aton sockaddr_in);
+use Symbol qw(qualify);
 
-## Base classes.
+## Base class.
 use vars qw(@ISA);
 @ISA = qw(Exporter);
 if (eval 'require IO::Socket') {
@@ -21,9 +40,17 @@ else {
 }
 
 ## Global variables.
-use vars qw($VERSION $Default_blksize);
-$VERSION = "3.00";
-$Default_blksize = 8192;
+use vars qw($Default_blocksize $VERSION @Telopts);
+$Default_blocksize = 8192;
+$VERSION = "3.01";
+@Telopts = ("BINARY", "ECHO", "RCP", "SUPPRESS GO AHEAD", "NAME", "STATUS",
+	    "TIMING MARK", "RCTE", "NAOL", "NAOP", "NAOCRD", "NAOHTS",
+	    "NAOHTD", "NAOFFD", "NAOVTS", "NAOVTD", "NAOLFD", "EXTEND ASCII",
+	    "LOGOUT", "BYTE MACRO", "DATA ENTRY TERMINAL", "SUPDUP",
+	    "SUPDUP OUTPUT", "SEND LOCATION", "TERMINAL TYPE", "END OF RECORD",
+	    "TACACS UID", "OUTPUT MARKING", "TTYLOC", "3270 REGIME", "X.3 PAD",
+	    "NAWS", "TSPEED", "LFLOW", "LINEMODE", "XDISPLOC", "OLD-ENVIRON",
+	    "AUTHENTICATION", "ENCRYPT", "NEW-ENVIRON");
 
 
 ########################### Public Methods ###########################
@@ -37,36 +64,52 @@ sub new {
        $self,
        %args,
        );
+    local $_;
 
     ## Create a new object with defaults.
     $self = $class->SUPER::new;
     $ {*$self}{net_telnet} = {
-	bin_mode     => '',
-	blksize      => $Default_blksize,
-	buf          => '',
-	cmd_prompt   => '/[$%#>] $/',
+	bin_mode     => 0,
+	blksize      => $Default_blocksize,
+	buf          => "",
+	cmd_prompt   => '/[\$%#>] $/',
+	cmd_rm_mode  => "auto",
+	dumplog      => '',
 	eofile       => 1,
 	errormode    => 'die',
-	errormsg     => '',
+	errormsg     => "",
 	fdmask       => '',
-	host         => 'localhost',
+	host         => "localhost",
 	inputlog     => '',
-	last_line    => '',
+	last_line    => "",
 	maxbufsize   => 1024 * 1024,
-	dumplog      => '',
 	num_wrote    => 0,
-	ofs          => '',
+	ofs          => "",
 	opened       => '',
+	opt_cback    => '',
+	opt_log      => '',
+	opts         => {},
 	ors          => "\n",
 	outputlog    => '',
 	port         => 23,
-	pushback_buf => '',
+	pushback_buf => "",
 	rs           => "\n",
 	telnet_mode  => 1,
 	time_out     => 10,
 	timedout     => '',
-	unsent_opts  => '',
+	unsent_opts  => "",
     };
+
+    ## Indicate that we'll accept an offer from remote side for it to echo
+    ## and suppress go aheads.
+    &_opt_accept($self,
+		 { option    => &TELOPT_ECHO,
+		   is_remote => 1,
+		   is_enable => 1 },
+		 { option    => &TELOPT_SGA,
+		   is_remote => 1,
+		   is_enable => 1 },
+		 );
 
     ## Parse the args.
     if (@_ == 2) {  # one positional arg given
@@ -81,11 +124,14 @@ sub new {
 	    $self->errmode($args{$_})
 		if /^-?errmode$/i;
 	}
-	
+
 	## Parse all other named args.
 	foreach (keys %args) {
 	    if (/^-?binmode$/i) {
 		$self->binmode($args{$_});
+	    }
+	    elsif (/^-?cmd_remove_mode$/i) {
+		$self->cmd_remove_mode($args{$_});
 	    }
 	    elsif (/^-?dump_log$/i) {
 		$self->dump_log($args{$_});
@@ -104,6 +150,9 @@ sub new {
 	    }
 	    elsif (/^-?input_record_separator$/i) {
 		$self->input_record_separator($args{$_});
+	    }
+	    elsif (/^-?option_log$/i) {
+		$self->option_log($args{$_});
 	    }
 	    elsif (/^-?output_log$/i) {
 		$self->output_log($args{$_});
@@ -128,15 +177,18 @@ sub new {
 	    else {
 		$self->error('usage: Net::Telnet->new(' .
 			     '[Binmode => $mode,] ' .
+			     '[Cmd_remove_mode => $mode,] ' .
 			     '[Dump_Log => $filename,] ' .
 			     '[Errmode => $errmode,] ' .
 			     '[Fhopen => $filehandle,] ' .
 			     '[Host => $host,] ' .
 			     '[Input_log => $file,] ' .
 			     '[Input_record_separator => $char,] ' .
+			     '[Option_log => $file,] ' .
 			     '[Output_log => $file,] ' .
 			     '[Output_record_separator => $char,] '.
-			     '[Port => $port,] [Prompt => $matchop,] ' .
+			     '[Port => $port,] ' .
+			     '[Prompt => $matchop,] ' .
 			     '[Telnetmode => $mode,] ' .
 			     '[Timeout => $secs,])');
 	    }
@@ -147,9 +199,8 @@ sub new {
 	$self->fhopen($fh_open)
 	    or return;
     }
-    elsif (defined $host) {  # user want us to open a connection to host
-	$self->host($host)
-	    or return;
+    elsif (defined $host) {  # user wants us to open a connection to host
+	$self->host($host);
 	$self->open
 	    or return;
     }
@@ -169,17 +220,16 @@ sub binmode {
        $stream,
        );
 
-    ## With no args, turn on binary mode.
-    if (@_ < 2) {
-	$mode = 1;
-    }
-    else {
-	defined $mode or $mode = '';
-    }
-
     $stream = $ {*$self}{net_telnet};
     $prev = $stream->{bin_mode};
-    $stream->{bin_mode} = $mode;
+
+    if (@_ >= 2) {
+	$mode = 0
+	    unless defined $mode;
+
+	$stream->{bin_mode} = $mode;
+    }
+
     $prev;
 } # end sub binmode
 
@@ -189,10 +239,29 @@ sub break {
     my $stream = $ {*$self}{net_telnet};
     $stream->{timedout} = '';
     return if $stream->{eofile};
-    local $stream->{rs} = '';
+    local $stream->{ors} = '';
 
     $self->print("\xff\xf3");
 } # end sub break
+
+
+sub buffer {
+    my($self) = @_;
+    my $stream = $ {*$self}{net_telnet};
+
+    \$stream->{buf};
+} # end sub buffer
+
+
+sub buffer_empty {
+    my($self) = @_;
+    my(
+       $buffer,
+       );
+
+    $buffer = $self->buffer;
+    $$buffer = "";
+} # end sub buffer_empty
 
 
 sub close {
@@ -212,6 +281,8 @@ sub cmd {
     my($self, @args) = @_;
     my(
        $arg,
+       $buf,
+       $cmd_remove_mode,
        $firstpos,
        $lastpos,
        $lines,
@@ -221,14 +292,18 @@ sub cmd {
        $output,
        $output_ref,
        $prompt,
+       $remove_echo,
        $rs,
        $rs_len,
+       $telopt_echo,
        $timeout,
        @cmd,
        );
+    local $_;
 
     ## Init vars.
     $output = [];
+    $cmd_remove_mode = $self->cmd_remove_mode;
     $timeout = $self->timeout;
     $self->timed_out('');
     return if $self->eof;
@@ -240,7 +315,12 @@ sub cmd {
     elsif (@_ > 2) {  # named args given
 	## Parse the named args.
 	while (($_, $arg) = splice @args, 0, 2) {
-	    if (/^-?output$/i) {
+	    if (/^-?cmd_remove/i) {
+		$cmd_remove_mode = $arg;
+		$cmd_remove_mode = "auto"
+		    if $cmd_remove_mode =~ /^auto/i;
+	    }
+	    elsif (/^-?output$/i) {
 		$output_ref = $arg;
 		if (defined($output_ref) and ref($output_ref) eq "ARRAY") {
 		    $output = $output_ref;
@@ -257,6 +337,7 @@ sub cmd {
 	    }
 	    else {
 		return $self->error('usage: $obj->cmd(',
+				    '[Cmd_remove => $boolean,] ',
 				    '[Output => $ref,] ',
 				    '[Prompt => $match,] ',
 				    '[String => $string,] ',
@@ -285,7 +366,7 @@ sub cmd {
     return $self->error($self->errmsg) if $self->errmsg ne '';
     return if $self->eof;
 
-    ## Split on record terminator while maintaining terminator in output.
+    ## Split lines into an array, keeping record separator at end of line.
     $firstpos = 0;
     $rs = $self->input_record_separator;
     $rs_len = length $rs;
@@ -299,8 +380,24 @@ sub cmd {
 	push @$output, substr($lines, $firstpos);
     }
 
-    ## Get rid of echo back command.
-    shift @$output;
+    ## Determine if we should remove the first line of output based
+    ## on the assumption that it's an echoed back command.
+    if ($cmd_remove_mode eq "auto") {
+	## See if remote side told us they'd echo.
+	$telopt_echo = $self->option_state(&TELOPT_ECHO);
+	$remove_echo = $telopt_echo->{remote_enabled};
+    }
+    else {  # user explicitly told us how many lines to remove.
+	$remove_echo = $cmd_remove_mode;
+    }
+
+    ## Get rid of possible echo back command.
+    while ($remove_echo--) {
+	shift @$output;
+    }
+
+    ## Ensure at least a null string when there's no command output - so
+    ## "true" is returned in a list context.
     unless (@$output) {
 	@$output = ('');
     }
@@ -314,9 +411,46 @@ sub cmd {
 	    %$output_ref = @$output;
 	}
     }
-    
+
     wantarray ? @$output : 1;
 } # end sub cmd
+
+
+sub cmd_remove_mode {
+    my($self, $mode) = @_;
+    my(
+       $prev,
+       $stream,
+       );
+
+    $stream = $ {*$self}{net_telnet};
+    $prev = $stream->{cmd_rm_mode};
+
+    if (@_ >= 2) {
+	if (! defined $mode) {
+	    $mode = 0;
+	}
+	elsif ($mode =~ /^auto/i) {
+	    $mode = "auto";
+	}
+	else {
+	    ## Ensure it's a non-negative integer.
+	    eval {
+		local $^W = 1;
+		local $SIG{'__WARN__'} = sub { die "non-numeric\n" };
+		local $SIG{'__DIE__'} = 'DEFAULT';
+		$mode = abs(int $mode);
+	    };
+	    if ($@) {
+		$mode = 0;
+	    }
+	}
+
+	$stream->{cmd_rm_mode} = $mode;
+    }
+
+    $prev;
+} # end sub cmd_remove_mode
 
 
 sub dump_log {
@@ -450,41 +584,50 @@ sub fhopen {
     my($self, $fh) = @_;
     my(
        $blksize,
-       $fd,
+       $globref,
        $stream,
        );
 
-    {
-	no strict 'refs';
-	$fd = fileno $fh;
-    }
+    ## Convert given filehandle to a typeglob reference, if necessary.
+    $globref = &_qualify_fh($self, $fh);
 
-    ## Ensure associated filehandle is already open.
+    ## Ensure filehandle is already open.
     return $self->error("fhopen filehandle isn't already open")
-	unless defined $fd;
+	unless defined($globref) and defined(fileno $globref);
 
-    ## Ensure object is closed.
+    ## Ensure we're closed.
     $self->close;
 
-    ## Associate the object with already open filehandle.
-    open $self, "+<&=$fd"
-	or return $self->error("problem attaching to fhopen filehandle: $!");
-    $self->autoflush;
+    ## Save our private data.
+    $stream = $ {*$self}{net_telnet};
 
-    ## Re-initialize the object.
+    ## Switch ourself with the given filehandle.
+    *$self = *$globref;
+
+    ## Restore our private data.
+    $ {*$self}{net_telnet} = $stream;
+
+    ## Re-initialize ourself.
+    $self->autoflush;
     $stream = $ {*$self}{net_telnet};
     $blksize = (stat $self)[11];
-    $stream->{blksize} = $blksize || $Default_blksize;
-    $stream->{buf} = '';
+    $stream->{blksize} = $blksize || $Default_blocksize;
+    $stream->{buf} = "";
+    $stream->{cmd_rm_mode} = 0;
     $stream->{eofile} = '';
+    $stream->{errormsg} = "";
     vec($stream->{fdmask}='', fileno($self), 1) = 1;
-    $stream->{host} = '';
-    $stream->{last_line} = '';
-    $stream->{num_wrote} = '';
+    $stream->{host} = "";
+    $stream->{last_line} = "";
+    $stream->{num_wrote} = 0;
     $stream->{opened} = 1;
-    $stream->{pushback_buf} = '';
+    $stream->{port} = '';
+    $stream->{pushback_buf} = "";
+    $stream->{telnet_mode} = 0;
     $stream->{timedout} = '';
-    $stream->{unsent_opts} = '';
+    $stream->{unsent_opts} = "";
+    &_reset_options($stream->{opts});
+
     1;
 } # end sub fhopen
 
@@ -497,6 +640,7 @@ sub get {
        $stream,
        $timeout,
        );
+    local $_;
 
     ## Init vars.
     $stream = $ {*$self}{net_telnet};
@@ -568,6 +712,7 @@ sub getline {
        $stream,
        $timeout,
        );
+    local $_;
 
     ## Init vars.
     $stream = $ {*$self}{net_telnet};
@@ -637,7 +782,7 @@ sub getlines {
     $line = getline(@_)
 	or return;
     push @lines, $line;
-    
+
     ## Extract subsequent lines from buffer.
     while (($pos = index($stream->{buf}, $stream->{rs})) != -1) {
 	$len = $pos + length $stream->{rs};
@@ -660,9 +805,9 @@ sub host {
     $prev = $stream->{host};
 
     if (@_ >= 2) {
-	unless (defined $host and length $host) {
-	    $host = 'localhost';
-	}
+	$host = ''
+	    unless defined $host and length $host;
+
 	$stream->{host} = $host;
     }
 
@@ -734,6 +879,7 @@ sub login {
        $cmd_prompt,
        $endtime,
        $error,
+       $lastline,
        $match,
        $orig_errmode,
        $orig_timeout,
@@ -745,6 +891,7 @@ sub login {
        $username,
        %args,
        );
+    local $_;
 
     ## Init vars.
     $timeout = $self->timeout;
@@ -799,7 +946,7 @@ sub login {
     $endtime = &_endtime($timeout);
     $orig_timeout = $self->timeout($endtime);
     $orig_errmode = $self->errmode('return');
-    
+
     ## Create a subroutine to reset to original values.
     $reset
 	= sub {
@@ -818,7 +965,8 @@ sub login {
 		return $self->error($errmsg);
 	    }
 	    elsif ($self->eof) {
-		return $self->error($errmsg, ": ", $self->lastline);
+		($lastline = $self->lastline) =~ s/\n+//;
+		return $self->error($errmsg, ": ", $lastline);
 	    }
 	    else {
 		return $self->error($self->errmsg);
@@ -828,7 +976,11 @@ sub login {
     ## Wait for login prompt.
     $self->waitfor(-match => '/login[: ]*$/i',
 		   -match => '/username[: ]*$/i')
-	or return &$error("login timed-out waiting for login prompt");
+	or do {
+	    return &$error("read eof waiting for login prompt")
+		if $self->eof;
+	    return &$error("timed-out waiting for login prompt");
+	};
 
     ## Send login name.
     $self->print($username)
@@ -836,23 +988,32 @@ sub login {
 
     ## Wait for password prompt.
     $self->waitfor(-match => '/password[: ]*$/i')
-	or return &$error("login timed-out waiting for password prompt");
+	or do {
+	    return &$error("read eof waiting for password prompt")
+		if $self->eof;
+	    return &$error("timed-out waiting for password prompt");
+	};
 
     ## Send password.
     $self->print($passwd)
 	or return &$error("login disconnected");
 
     ## Wait for command prompt or another login prompt.
-    ($prematch, $match) = $self->waitfor(-match => $cmd_prompt,
-					 -match => '/login[: ]*$/i')
-	or return &$error("login timed-out waiting for command prompt");
-    
-    ## Reset to orig values.
+    ($prematch, $match) = $self->waitfor(-match => '/login[: ]*$/i',
+					 -match => '/username[: ]*$/i',
+					 -match => $cmd_prompt)
+	or do {
+	    return &$error("read eof waiting for command prompt")
+		if $self->eof;
+	    return &$error("timed-out waiting for command prompt");
+	};
+
+    ## Reset object to orig values.
     &$reset;
 
     ## It's a bad login if we got another login prompt.
     return $self->error("login failed: bad name or password")
-	if $match =~ /login[: ]*$/i or $match =~ '/username[: ]*$/i';
+	if $match =~ /login[: ]*$/i or $match =~ /username[: ]*$/i;
 
     1;
 } # end sub login
@@ -880,12 +1041,13 @@ sub max_buffer_length {
 	eval {
 	    local $^W = 1;
 	    local $SIG{'__WARN__'} = sub { die "non-numeric\n" };
+	    local $SIG{'__DIE__'} = 'DEFAULT';
 	    $maxbufsize *= 1;
 	};
 	if ($@ or $maxbufsize < $minbufsize) {
 	    $maxbufsize = $minbufsize;
 	}
-	
+
 	$stream->{maxbufsize} = $maxbufsize;
     }
 
@@ -897,7 +1059,6 @@ sub open {
     my($self) = @_;
     my(
        $blksize,
-       $connected,
        $errno,
        $host,
        $ip_addr,
@@ -906,6 +1067,7 @@ sub open {
        $timeout,
        %args,
        );
+    local $_;
 
     ## Init vars.
     $stream = $ {*$self}{net_telnet};
@@ -943,7 +1105,7 @@ sub open {
     $host = $self->host;
     $port = $self->port;
 
-    ## Ensure object is already closed.
+    ## Ensure we're already closed.
     $self->close;
 
     ## Don't use a timeout if we can't use the alarm signal.
@@ -957,10 +1119,11 @@ sub open {
 	    $timeout = 1;
 	}
 	$timeout = int($timeout + 1.5);
-	
+
 	## Connect to server, timing out if it takes too long.
 	eval {
 	    ## Turn on timer.
+	    local $SIG{'__DIE__'} = 'DEFAULT';
 	    local $SIG{ALRM} = sub { die "timed-out\n" };
 	    alarm $timeout;
 
@@ -973,7 +1136,7 @@ sub open {
 		or die "problem creating socket: $!\n";
 
 	    ## Open connection to server.
-	    $connected = connect $self, sockaddr_in($port, $ip_addr)
+	    connect $self, sockaddr_in($port, $ip_addr)
 		or die "problem connecting to \"$host\", port $port: $!\n";
 	};
 	alarm 0;
@@ -1018,18 +1181,159 @@ sub open {
 
     $self->autoflush;
     $blksize = (stat $self)[11];
-    $stream->{blksize} = $blksize || $Default_blksize;
-    $stream->{buf} = '';
+    $stream->{blksize} = $blksize || $Default_blocksize;
+    $stream->{buf} = "";
     $stream->{eofile} = '';
+    $stream->{errormsg} = "";
     vec($stream->{fdmask}='', fileno($self), 1) = 1;
-    $stream->{last_line} = '';
-    $stream->{num_wrote} = '';
+    $stream->{last_line} = "";
+    $stream->{num_wrote} = 0;
     $stream->{opened} = 1;
-    $stream->{pushback_buf} = '';
+    $stream->{pushback_buf} = "";
     $stream->{timedout} = '';
-    $stream->{unsent_opts} = '';
+    $stream->{unsent_opts} = "";
+    &_reset_options($stream->{opts});
+
     1;
 } # end sub open
+
+
+sub option_accept {
+    my($self, @args) = @_;
+    my(
+       $arg,
+       $option,
+       $stream,
+       @opt_args,
+       );
+    local $_;
+
+    ## Init vars.
+    $stream = $ {*$self}{net_telnet};
+
+    ## Parse the named args.
+    while (($_, $arg) = splice @args, 0, 2) {
+	## Verify and save arguments.
+	if (/^-?do$/i) {
+	    ## Make sure a callback is defined.
+	    return $self->error("usage: an option callback must already ",
+				"be defined when enabling with $_")
+		unless $stream->{opt_cback};
+
+	    $option = &_verify_telopt_arg($self, $arg, $_)
+		or return;
+	    push @opt_args, { option    => $option,
+			      is_remote => '',
+			      is_enable => 1,
+			  };
+	}
+	elsif (/^-?dont$/i) {
+	    $option = &_verify_telopt_arg($self, $arg, $_)
+		or return;
+	    push @opt_args, { option    => $option,
+			      is_remote => '',
+			      is_enable => '',
+			  };
+	}
+	elsif (/^-?will$/i) {
+	    ## Make sure a callback is defined.
+	    return $self->error("usage: an option callback must already ",
+				"be defined when enabling with $_")
+		unless $stream->{opt_cback};
+
+	    $option = &_verify_telopt_arg($self, $arg, $_)
+		or return;
+	    push @opt_args, { option    => $option,
+			      is_remote => 1,
+			      is_enable => 1,
+			  };
+	}
+	elsif (/^-?wont$/i) {
+	    $option = &_verify_telopt_arg($self, $arg, $_)
+		or return;
+	    push @opt_args, { option    => $option,
+			      is_remote => 1,
+			      is_enable => '',
+			  };
+	}
+	else {
+	    return $self->error('usage: $obj->option_accept(' .
+				'[Do => $telopt,] ',
+				'[Dont => $telopt,] ',
+				'[Will => $telopt,] ',
+				'[Wont => $telopt,]');
+	}
+    }
+
+    ## Set "receive ok" for options specified.
+    &_opt_accept($self, @opt_args);
+} # end sub option_accept
+
+
+sub option_callback {
+    my($self, $callback) = @_;
+    my(
+       $prev,
+       $stream,
+       );
+
+    $stream = $ {*$self}{net_telnet};
+    $prev = $stream->{opt_cback};
+
+    if (@_ >= 2) {
+	return $self->error("actual argument is not a code ref")
+	    unless defined $callback and ref($callback) eq "CODE";
+
+	$stream->{opt_cback} = $callback;
+    }
+
+    $prev;
+} # end sub option_callback
+
+
+sub option_log {
+    my($self, $name) = @_;
+    my(
+       $fh,
+       $prev,
+       $stream,
+       );
+
+    $stream = $ {*$self}{net_telnet};
+    $prev = $stream->{opt_log};
+
+    if (@_ >= 2) {
+	$fh = &_fname_to_handle($self, $name);
+	$stream->{opt_log} = $fh;
+    }
+
+    $prev;
+} # end sub option_log
+
+
+sub option_state {
+    my($self, $option) = @_;
+    my(
+       $opt_state,
+       $stream,
+       %opt_state,
+       );
+
+    ## Ensure telnet option is non-negative integer.
+    $option = &_verify_telopt_arg($self, $option)
+	or return;
+
+    ## Init vars.
+    $stream = $ {*$self}{net_telnet};
+    unless (defined $stream->{opts}{$option}) {
+	&_set_default_option($stream, $option);
+    }
+
+    ## Return hashref to a copy of the values.
+    $opt_state = $stream->{opts}{$option};
+    %opt_state = %$opt_state;
+    \%opt_state;
+} # end sub option_state
 
 
 sub output_field_separator {
@@ -1156,8 +1460,8 @@ sub print {
 	$fh->print($data);
     }
 
-    ## Convert newlines to carriage-return and newline.
-    $data =~ s(\n)(\r\n)g
+    ## Convert newlines to carriage-return and linefeed.
+    $data =~ s(\n)(\015\012)g
 	unless $stream->{bin_mode};
 
     $offset = 0;
@@ -1177,8 +1481,8 @@ sub print {
 	    if ($nwrote = syswrite $self, $data, $len, $offset) {
 		## If requested, display network traffic.
 		($stream->{dumplog})
-		    and &_dump_data('>', $stream->{dumplog},
-				    \$data, $offset, $nwrote);
+		    and &_log_dump('>', $stream->{dumplog},
+				   \$data, $offset, $nwrote);
 
 		$stream->{num_wrote} += $nwrote;
 		$offset += $nwrote;
@@ -1187,7 +1491,7 @@ sub print {
 	    }
 	    elsif (! defined $nwrote) {  # write failed
 		next if $! =~ /^Interrupted/;
-		
+
 		$stream->{opened} = '';
 		return $self->error("unexpected write error: $!");
 	    }
@@ -1254,17 +1558,16 @@ sub telnetmode {
        $stream,
        );
 
-    ## With no args, turn on telnet mode.
-    if (@_ < 2) {
-	$mode = 1;
-    }
-    else {
-	defined $mode or $mode = '';
-    }
-
     $stream = $ {*$self}{net_telnet};
     $prev = $stream->{telnet_mode};
-    $stream->{telnet_mode} = $mode;
+
+    if (@_ >= 2) {
+	$mode = 0
+	    unless defined $mode;
+
+	$stream->{telnet_mode} = $mode;
+    }
+
     $prev;
 } # end sub telnetmode
 
@@ -1327,6 +1630,7 @@ sub waitfor {
        @string_cond,
        @warns,
        );
+    local $_;
 
     ## Init vars.
     $stream = $ {*$self}{net_telnet};
@@ -1428,9 +1732,9 @@ sub waitfor {
     }
 
     ## Check for failure.
-    return $self->error("pattern timed-out") if $stream->{timedout};
+    return $self->error("pattern match timed-out") if $stream->{timedout};
     return $self->error($stream->{errormsg}) if $stream->{errormsg} ne '';
-    return if $stream->{eofile};
+    return $self->error("pattern match read eof") if $stream->{eofile};
 
     ## Check for Perl syntax errors or warnings.
     if ($@ or @warns) {
@@ -1452,35 +1756,13 @@ sub waitfor {
 sub _append_lineno {
     my($obj, @msgs) = @_;
     my(
-       $class,
-       $curr_pkg,
        $file,
-       $i,
        $line,
        $pkg,
-       %isa,
-       @isa,
        );
 
-
-    ## Create a boolean hash to test for isa.  Make sure current
-    ## package and the object's class are members.
-    $class = ref $obj;
-    ($curr_pkg) = caller 1;
-    @isa = eval "\@${class}::ISA";
-    push @isa, $class, $curr_pkg;
-    %isa = map {$_ => 1} @isa;
-
-    ## Search back in call frames for a package that's not in isa.
-    $i = 1;
-    while (($pkg, $file , $line) = caller ++$i) {
-	next if $isa{$pkg};
-
-	return join('', @msgs, " at ", $file, " line ", $line, "\n");
-    }
-
-    ## If not found, choose outer most call frame.
-    ($pkg, $file , $line) = caller --$i;
+    ## Find the caller that's not in object's class or one of its base classes.
+    ($pkg, $file , $line) = &_user_caller($obj);
     join('', @msgs, " at ", $file, " line ", $line, "\n");
 } # end sub _append_lineno
 
@@ -1493,49 +1775,6 @@ sub _carp {
 sub _croak {
     die &_append_lineno(@_);
 } # end sub _croak
-
-
-sub _dump_data {
-    my($direction, $fh, $data, $offset, $len) = @_;
-    my(
-       $addr,
-       $hexvals,
-       $line,
-       );
-
-    $addr = 0;
-    $len = length($$data) - $offset
-	unless defined $len;
-    
-    ## Print data in dump format.
-    while ($len > 0) {
-	## Convert up to the next 16 chars to hex, padding w/ spaces.
-	if ($len >= 16) {
-	    $line = substr $$data, $offset, 16;
-	}
-	else {
-	    $line = substr $$data, $offset, $len;
-	}
-	$hexvals = unpack('H*', $line);
-	$hexvals .= ' ' x (32 - length $hexvals);
-
-	## Place in 16 columns, each containing two hex digits.
-	$hexvals = sprintf("%s %s %s %s  " x 4,
-			   unpack('a2' x 16, $hexvals));
-	
-	## For the ASCII column, change unprintable chars to a period.
-	$line =~ s/[\000-\037,\177-\237]/./g;
-
-	## Print the line in dump format.
-	printf($fh "%s 0x%5.5lx: %s%s\n", $direction, $addr, $hexvals, $line);
-
-	$addr += 16;
-	$offset += 16;
-	$len -= 16;
-    }
-
-    1;
-} # end sub _dump_data
 
 
 sub _endtime {
@@ -1608,8 +1847,8 @@ sub _fillbuf {
 	    if ($nread = sysread $self, $s->{buf}, $s->{blksize}, $offset) {
 		## If requested, display network traffic.
 		($s->{dumplog})
-		    and &_dump_data('<', $s->{dumplog}, \$s->{buf}, $offset);
-		
+		    and &_log_dump('<', $s->{dumplog}, \$s->{buf}, $offset);
+
 		## Process any telnet commands in the data stream.
 		if ($s->{telnet_mode}
 		    and index($s->{buf}, "\377", $offset - $pushback_len) > -1)
@@ -1619,25 +1858,27 @@ sub _fillbuf {
 
 		## Process carriage-return sequences in the data stream.
 		$pos = $offset - $pushback_len;
-		while (($pos = index($s->{buf}, "\r", $pos)) > -1) {
+		while (($pos = index($s->{buf}, "\015", $pos)) > -1) {
 		    $nextchar = substr($s->{buf}, $pos + 1, 1);
 		    if ($nextchar eq "\0") {
-			## Convert \r\0 to \r
-			substr($s->{buf}, $pos + 1, 1) = '';
+			## Convert CR NULL to CR
+			substr($s->{buf}, $pos + 1, 1) = ''
+			    if $s->{telnet_mode};
 		    }
-		    elsif ($nextchar eq "\n") {
-			## Convert \r\n to \n when not in binary mode.
-			substr($s->{buf}, $pos, 1) = ''
-			    unless $s->{bin_mode};
+		    elsif ($nextchar eq "\012") {
+			## Convert CR LF to newline when not in binary mode.
+			substr($s->{buf}, $pos, 2) = "\n"
+			    if ! $s->{bin_mode};
 		    }
-		    elsif (! length $nextchar) {
-			$s->{pushback_buf} .= "\r";
+		    elsif (! length($nextchar) and $s->{telnet_mode}) {
+			## Save CR for possible CR NULL conversion.
+			$s->{pushback_buf} .= "\015";
 			chop $s->{buf};
 		    }
 
 		    $pos++;
 		}
-		
+
 		next if length $s->{buf} <= $offset;
 
 		## If requested, log the input.
@@ -1683,7 +1924,7 @@ sub _fillbuf {
 	    }
 	    elsif (! defined $nread) {  # read failed
 		next if $! =~ /^Interrupted/;
-		
+
 		$s->{opened} = '';
 		return $self->error("unexpected read error: $!");
 	    }
@@ -1764,8 +2005,9 @@ sub _fname_to_handle {
 
 sub _have_alarm {
     eval {
-	alarm 0;
+	local $SIG{'__DIE__'} = 'DEFAULT';
 	local $SIG{ALRM} = sub { die };
+	alarm 0;
     };
 
     ! $@;
@@ -1813,15 +2055,8 @@ sub _interpret_cmd {
 	    ## Remove command from data stream.
 	    substr($s->{buf}, $pos, 3) = '';
 
-	    ## Ignore all options except "DO" and "WILL".
-	    if ($nextchar eq "\375") {  # DO
-		## Indicate we "won't" do this option request.
-		$s->{unsent_opts} .= "\377\374$option";
-	    }
-	    elsif ($nextchar eq "\373") {  # WILL
-		## Indicate we "don't" do this option request.
-		$s->{unsent_opts} .= "\377\376$option";
-	    }
+	    ## Handle option negotiation.
+	    &_negotiate_recv($self, $s, $nextchar, ord($option), $pos);
 	}
 	elsif ($nextchar eq "\372") {  # start of subnegotiation parameters
 	    ## Save command if it's only partially read.
@@ -1831,7 +2066,7 @@ sub _interpret_cmd {
 		substr($s->{buf}, $pos) = '';
 		last;
 	    }
-	    
+
 	    ## Ignore subnegotiation cmd.
 	    substr($s->{buf}, $pos, $endpos - $pos + 1) = '';
 	}
@@ -1850,6 +2085,68 @@ sub _interpret_cmd {
 } # end sub _interpret_cmd
 
 
+sub _log_dump {
+    my($direction, $fh, $data, $offset, $len) = @_;
+    my(
+       $addr,
+       $hexvals,
+       $line,
+       );
+
+    $addr = 0;
+    $len = length($$data) - $offset
+	unless defined $len;
+
+    ## Print data in dump format.
+    while ($len > 0) {
+	## Convert up to the next 16 chars to hex, padding w/ spaces.
+	if ($len >= 16) {
+	    $line = substr $$data, $offset, 16;
+	}
+	else {
+	    $line = substr $$data, $offset, $len;
+	}
+	$hexvals = unpack('H*', $line);
+	$hexvals .= ' ' x (32 - length $hexvals);
+
+	## Place in 16 columns, each containing two hex digits.
+	$hexvals = sprintf("%s %s %s %s  " x 4,
+			   unpack('a2' x 16, $hexvals));
+
+	## For the ASCII column, change unprintable chars to a period.
+	$line =~ s/[\000-\037,\177-\237]/./g;
+
+	## Print the line in dump format.
+	printf $fh "%s 0x%5.5lx: %s%s\n", $direction, $addr, $hexvals, $line;
+
+	$addr += 16;
+	$offset += 16;
+	$len -= 16;
+    }
+
+    print $fh "\n";
+
+    1;
+} # end sub _log_dump
+
+
+sub _log_option {
+    my($fh, $direction, $request, $option) = @_;
+    my(
+       $name,
+       );
+
+    if ($option >= 0 and $option <= $#Telopts) {
+	$name = $Telopts[$option];
+    }
+    else {
+	$name = $option;
+    }
+
+    print $fh "$direction $request $name\n";
+} # end sub _log_option
+
+
 sub _match_check {
     my($self, $code) = @_;
     my $error;
@@ -1859,6 +2156,7 @@ sub _match_check {
     {
 	local $^W = 1;
 	local $SIG{'__WARN__'} = sub { push @warns, @_ };
+	local $SIG{'__DIE__'} = 'DEFAULT';
 	local $_ = '';
 	eval "\$_ =~ $code;";
     }
@@ -1880,6 +2178,279 @@ sub _match_check {
 } # end sub _match_check
 
 
+sub _negotiate_callback {
+    my($self, $opt, $is_remote, $is_enabled, $was_enabled, $opt_bufpos) = @_;
+    my(
+       $callback,
+       $opt_state,
+       $stream,
+       );
+
+    ## Keep track of remote echo.
+    if ($is_remote and $opt == &TELOPT_ECHO) {  # received WILL or WONT ECHO
+	$stream = $ {*$self}{net_telnet};
+
+	if ($is_enabled and !$was_enabled) {  # received WILL ECHO
+	    $stream->{remote_echo} = 1;
+	}
+	elsif (!$is_enabled and $was_enabled) {  # received WONT ECHO
+	    $stream->{remote_echo} = '';
+	}
+    }
+
+    ## Invoke callback, if there is one.
+    $callback = $self->option_callback;
+    if ($callback) {
+	&$callback($self, $opt, $is_remote,
+		   $is_enabled, $was_enabled, $opt_bufpos);
+    }
+
+    1;
+} # end sub _negotiate_callback
+
+
+sub _negotiate_recv {
+    my($self, $s, $opt_request, $opt, $opt_bufpos) = @_;
+
+    ## Ensure data structure exists for this option.
+    unless (defined $s->{opts}{$opt}) {
+	&_set_default_option($s, $opt);
+    }
+
+    ## Process the option.
+    if ($opt_request eq "\376") {  # DONT
+	&_negotiate_recv_disable($self, $s, $opt, "dont", $opt_bufpos,
+				 $s->{opts}{$opt}{local_enable_ok},
+				 \$s->{opts}{$opt}{local_enabled},
+				 \$s->{opts}{$opt}{local_state});
+    }
+    elsif ($opt_request eq "\375") {  # DO
+	&_negotiate_recv_enable($self, $s, $opt, "do", $opt_bufpos,
+				$s->{opts}{$opt}{local_enable_ok},
+				\$s->{opts}{$opt}{local_enabled},
+				\$s->{opts}{$opt}{local_state});
+    }
+    elsif ($opt_request eq "\374") {  # WONT
+	&_negotiate_recv_disable($self, $s, $opt, "wont", $opt_bufpos,
+				 $s->{opts}{$opt}{remote_enable_ok},
+				 \$s->{opts}{$opt}{remote_enabled},
+				 \$s->{opts}{$opt}{remote_state});
+    }
+    elsif ($opt_request eq "\373") {  # WILL
+	&_negotiate_recv_enable($self, $s, $opt, "will", $opt_bufpos,
+				$s->{opts}{$opt}{remote_enable_ok},
+				\$s->{opts}{$opt}{remote_enabled},
+				\$s->{opts}{$opt}{remote_state});
+    }
+    else {  # internal error
+	die;
+    }
+
+    1;
+} # end sub _negotiate_recv
+
+
+sub _negotiate_recv_disable {
+    my($self, $s, $opt, $opt_request,
+       $opt_bufpos, $enable_ok, $is_enabled, $state) = @_;
+    my(
+       $ack,
+       $disable_cmd,
+       $enable_cmd,
+       $is_remote,
+       $nak,
+       $was_enabled,
+       );
+
+    ## What do we use to request enable/disable or respond with ack/nak.
+    if ($opt_request eq "wont") {
+	$enable_cmd  = "\377\375" . pack('C', $opt);  # do command
+	$disable_cmd = "\377\376" . pack('C', $opt);  # dont command
+	$is_remote = 1;
+	$ack = "DO";
+	$nak = "DONT";
+
+	&_log_option($s->{opt_log}, "RCVD", "WONT", $opt)
+	    if $s->{opt_log};
+    }
+    elsif ($opt_request eq "dont") {
+	$enable_cmd  = "\377\373" . pack('C', $opt);  # will command
+	$disable_cmd = "\377\374" . pack('C', $opt);  # wont command
+	$is_remote = '';
+	$ack = "WILL";
+	$nak = "WONT";
+
+	&_log_option($s->{opt_log}, "RCVD", "DONT", $opt)
+	    if $s->{opt_log};
+    }
+    else {  # internal error
+	die;
+    }
+
+    ## Respond to WONT or DONT based on the current negotiation state.
+    if ($$state eq "no") {  # state is already disabled
+    }
+    elsif ($$state eq "yes") {  # they're initiating disable
+	$$is_enabled = '';
+	$$state = "no";
+
+	## Send positive acknowledgment.
+	$s->{unsent_opts} .= $disable_cmd;
+	&_log_option($s->{opt_log}, "SENT", $nak, $opt)
+	    if $s->{opt_log};
+
+	## Invoke callbacks.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantno") {  # they sent positive ack
+	$$is_enabled = '';
+	$$state = "no";
+
+	## Invoke callback.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantno opposite") {  # pos ack but we changed our mind
+	## Indicate disabled but now we want to enable.
+	$$is_enabled = '';
+	$$state = "wantyes";
+
+	## Send queued request.
+	$s->{unsent_opts} .= $enable_cmd;
+	&_log_option($s->{opt_log}, "SENT", $ack, $opt)
+	    if $s->{opt_log};
+
+	## Invoke callback.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantyes") {  # they sent negative ack
+	$$is_enabled = '';
+	$$state = "no";
+
+	## Invoke callback.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantyes opposite") {  # nak but we changed our mind
+	$$is_enabled = '';
+	$$state = "no";
+
+	## Invoke callback.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+} # end sub _negotiate_recv_disable
+
+
+sub _negotiate_recv_enable {
+    my($self, $s, $opt, $opt_request,
+       $opt_bufpos, $enable_ok, $is_enabled, $state) = @_;
+    my(
+       $ack,
+       $disable_cmd,
+       $enable_cmd,
+       $is_remote,
+       $nak,
+       $was_enabled,
+       );
+
+    ## What we use to send enable/disable request or send ack/nak response.
+    if ($opt_request eq "will") {
+	$enable_cmd  = "\377\375" . pack('C', $opt);  # do command
+	$disable_cmd = "\377\376" . pack('C', $opt);  # dont command
+	$is_remote = 1;
+	$ack = "DO";
+	$nak = "DONT";
+
+	&_log_option($s->{opt_log}, "RCVD", "WILL", $opt)
+	    if $s->{opt_log};
+    }
+    elsif ($opt_request eq "do") {
+	$enable_cmd  = "\377\373" . pack('C', $opt);  # will command
+	$disable_cmd = "\377\374" . pack('C', $opt);  # wont command
+	$is_remote = '';
+	$ack = "WILL";
+	$nak = "WONT";
+
+	&_log_option($s->{opt_log}, "RCVD", "DO", $opt)
+	    if $s->{opt_log};
+    }
+    else {  # internal error
+	die;
+    }
+
+    ## Save current enabled state.
+    $was_enabled = $$is_enabled;
+
+    ## Respond to WILL or DO based on the current negotiation state.
+    if ($$state eq "no") {  # they're initiating enable
+	if ($enable_ok) {  # we agree they/us should enable
+	    $$is_enabled = 1;
+	    $$state = "yes";
+
+	    ## Send positive acknowledgment.
+	    $s->{unsent_opts} .= $enable_cmd;
+	    &_log_option($s->{opt_log}, "SENT", $ack, $opt)
+		if $s->{opt_log};
+
+	    ## Invoke callbacks.
+	    &_negotiate_callback($self, $opt, $is_remote,
+				 $$is_enabled, $was_enabled, $opt_bufpos);
+	}
+	else {  # we disagree they/us should enable
+	    ## Send negative acknowledgment.
+	    $s->{unsent_opts} .= $disable_cmd;
+	    &_log_option($s->{opt_log}, "SENT", $nak, $opt)
+		if $s->{opt_log};
+	}
+    }
+    elsif ($$state eq "yes") {  # state is already enabled
+    }
+    elsif ($$state eq "wantno") {  # error: our disable req answered by enable
+	$$is_enabled = '';
+	$$state = "no";
+
+	## Invoke callbacks.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantno opposite") { # err: disable req answerd by enable
+	$$is_enabled = 1;
+	$$state = "yes";
+
+	## Invoke callbacks.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantyes") {  # they sent pos ack
+	$$is_enabled = 1;
+	$$state = "yes";
+
+	## Invoke callback.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+    elsif ($$state eq "wantyes opposite") {  # pos ack but we changed our mind
+	## Indicate enabled but now we want to disable.
+	$$is_enabled = 1;
+	$$state = "wantno";
+
+	## Inform other side we changed our mind.
+	$s->{unsent_opts} .= $disable_cmd;
+	&_log_option($s->{opt_log}, "SENT", $nak, $opt)
+	    if $s->{opt_log};
+
+	## Invoke callback.
+	&_negotiate_callback($self, $opt, $is_remote,
+			     $$is_enabled, $was_enabled, $opt_bufpos);
+    }
+
+    1;
+} # end sub _negotiate_recv_enable
+
+
 sub _new_handle {
     if ($INC{'IO/Handle.pm'}) {
 	return IO::Handle->new;
@@ -1891,6 +2462,37 @@ sub _new_handle {
 } # end sub _new_handle
 
 
+sub _opt_accept {
+    my($self, @args) = @_;
+    my(
+       $arg,
+       $option,
+       $stream,
+       );
+
+    ## Init vars.
+    $stream = $ {*$self}{net_telnet};
+
+    foreach $arg (@args) {
+	## Ensure data structure defined for this option.
+	$option = $arg->{option};
+	if (!defined $stream->{opts}{$option}) {
+	    &_set_default_option($stream, $option);
+	}
+
+	## Save whether we'll accept or reject this option.
+	if ($arg->{is_remote}) {
+	    $stream->{opts}{$option}{remote_enable_ok} = $arg->{is_enable};
+	}
+	else {
+	    $stream->{opts}{$option}{local_enable_ok} = $arg->{is_enable};
+	}
+    }
+
+    1;
+} # end sub _opt_accept
+
+
 sub _parse_timeout {
     my($timeout) = @_;
 
@@ -1900,6 +2502,7 @@ sub _parse_timeout {
 	eval {
 	    local $^W = 1;
 	    local $SIG{'__WARN__'} = sub { die "non-numeric\n" };
+	    local $SIG{'__DIE__'} = 'DEFAULT';
 	    $timeout *= 1;
 	};
 	if ($@) {  # timeout arg is non-numeric
@@ -1912,6 +2515,64 @@ sub _parse_timeout {
 
     $timeout;
 } # end sub _parse_timeout
+
+
+sub _qualify_fh {
+    my($obj, $name) = @_;
+    my(
+       $user_class,
+       );
+    local $_;
+
+    ## Get user's package name.
+    ($user_class) = &_user_caller($obj);
+
+    ## Ensure name is qualified with a package name.
+    $name = qualify($name, $user_class);
+
+    ## If it's not already, make it a typeglob ref.
+    if (! ref $name) {
+	no strict;
+	local $^W = 0;
+
+	$name =~ s/^\*+//;
+	$name = eval "\\*$name";
+	return unless ref $name;
+    }
+
+    $name;
+} # end sub _qualify_fh
+
+
+sub _reset_options {
+    my($opts) = @_;
+    my(
+       $opt,
+       );
+
+    foreach $opt (keys %$opts) {
+	$opts->{$opt}{remote_enabled} = '';
+	$opts->{$opt}{remote_state} = "no";
+	$opts->{$opt}{local_enabled} = '';
+	$opts->{$opt}{local_state} = "no";
+    }
+
+    1;
+} # end sub _reset_options
+
+
+sub _set_default_option {
+    my($stream, $option) = @_;
+
+    $stream->{opts}{$option} = {
+	remote_enabled   => '',
+	remote_state     => "no",
+	remote_enable_ok => '',
+	local_enabled    => '',
+	local_state      => "no",
+	local_enable_ok  => '',
+    };
+} # end sub _set_default_option
 
 
 sub _timeout_interval {
@@ -1939,121 +2600,148 @@ sub _timeout_interval {
 } # end sub _timeout_interval
 
 
+sub _user_caller {
+    my($obj) = @_;
+    my(
+       $class,
+       $curr_pkg,
+       $file,
+       $i,
+       $line,
+       $pkg,
+       $isa,
+       %isa,
+       @isa,
+       );
+
+    ## Create a boolean hash to test for isa.  Make sure current
+    ## package and the object's class are members.
+    $class = ref $obj;
+    @isa = eval "\@${class}::ISA";
+    push @isa, $class;
+    ($curr_pkg) = caller 1;
+    push @isa, $curr_pkg;
+    %isa = map {$_ => 1} @isa;
+
+    ## Search back in call frames for a package that's not in isa.
+    $i = 1;
+    while (($pkg, $file, $line) = caller ++$i) {
+	next if $isa{$pkg};
+
+	return($pkg, $file, $line);
+    }
+
+    ## If not found, choose outer most call frame.
+    ($pkg, $file, $line) = caller --$i;
+    return($pkg, $file, $line);
+} # end sub _user_caller
+
+
+sub _verify_telopt_arg {
+    my($self, $option, $argname) = @_;
+
+    ## If provided, use argument name in error message.
+    if (defined $argname) {
+	$argname = "for arg $argname";
+    }
+    else {
+	$argname = "";
+    }
+
+    ## Ensure telnet option is a non-negative integer.
+    eval {
+	local $^W = 1;
+	local $SIG{'__WARN__'} = sub { die "non-numeric\n" };
+	local $SIG{'__DIE__'} = 'DEFAULT';
+	$option = abs(int $option);
+    };
+    return $self->error("bad telnet option $argname: non-numeric")
+	if $@;
+
+    return $self->error("bad telnet option $argname: option > 255")
+	unless $option <= 255;
+
+    $option;
+} # end sub _verify_telopt_arg
+
+
 ######################## Exported Constants ##########################
 
 
-use vars qw(@EXPORT_OK);
-@EXPORT_OK = qw(TELNET_IAC TELNET_DONT TELNET_DO TELNET_WONT
-		TELNET_WILL TELNET_SB TELNET_GA TELNET_EL TELNET_EC
-		TELNET_AYT TELNET_AO TELNET_IP TELNET_BREAK TELNET_DM
-		TELNET_NOP TELNET_SE TELNET_EOR TELNET_ABORT
-		TELNET_SUSP TELNET_EOF TELNET_SYNCH TELOPT_BINARY
-		TELOPT_ECHO TELOPT_RCP TELOPT_SGA TELOPT_NAMS
-		TELOPT_STATUS TELOPT_TM TELOPT_RCTE TELOPT_NAOL
-		TELOPT_NAOP TELOPT_NAOCRD TELOPT_NAOHTS TELOPT_NAOHTD
-		TELOPT_NAOFFD TELOPT_NAOVTS TELOPT_NAOVTD
-		TELOPT_NAOLFD TELOPT_XASCII TELOPT_LOGOUT TELOPT_BM
-		TELOPT_DET TELOPT_SUPDUP TELOPT_SUPDUPOUTPUT
-		TELOPT_SNDLOC TELOPT_TTYPE TELOPT_EOR TELOPT_TUID
-		TELOPT_OUTMRK TELOPT_TTYLOC TELOPT_3270REGIME
-		TELOPT_X3PAD TELOPT_NAWS TELOPT_TSPEED TELOPT_LFLOW
-		TELOPT_LINEMODE TELOPT_XDISPLOC TELOPT_OLD_ENVIRON
-		TELOPT_AUTHENTICATION TELOPT_ENCRYPT
-		TELOPT_NEW_ENVIRON TELOPT_EXOPL SLC_SYNCH SLC_BRK
-		SLC_IP SLC_AO SLC_AYT SLC_EOR SLC_ABORT SLC_EOF
-		SLC_SUSP SLC_EC SLC_EL SLC_EW SLC_RP SLC_LNEXT SLC_XON
-		SLC_XOFF SLC_FORW1 SLC_FORW2
-		);
+sub TELNET_IAC ()	    {255}; # interpret as command:
+sub TELNET_DONT	()	    {254}; # you are not to use option
+sub TELNET_DO ()	    {253}; # please, you use option
+sub TELNET_WONT ()	    {252}; # I won't use option
+sub TELNET_WILL ()	    {251}; # I will use option
+sub TELNET_SB ()	    {250}; # interpret as subnegotiation
+sub TELNET_GA ()	    {249}; # you may reverse the line
+sub TELNET_EL ()	    {248}; # erase the current line
+sub TELNET_EC ()	    {247}; # erase the current character
+sub TELNET_AYT ()	    {246}; # are you there
+sub TELNET_AO ()	    {245}; # abort output--but let prog finish
+sub TELNET_IP ()	    {244}; # interrupt process--permanently
+sub TELNET_BREAK ()	    {243}; # break
+sub TELNET_DM ()	    {242}; # data mark--for connect. cleaning
+sub TELNET_NOP ()	    {241}; # nop
+sub TELNET_SE ()	    {240}; # end sub negotiation
+sub TELNET_EOR ()	    {239}; # end of record (transparent mode)
+sub TELNET_ABORT ()	    {238}; # Abort process
+sub TELNET_SUSP ()	    {237}; # Suspend process
+sub TELNET_EOF ()	    {236}; # End of file
+sub TELNET_SYNCH ()	    {242}; # for telfunc calls
 
-sub TELNET_IAC		{255};	# interpret as command:
-sub TELNET_DONT		{254};	# you are not to use option
-sub TELNET_DO		{253};	# please, you use option
-sub TELNET_WONT		{252};	# I won't use option
-sub TELNET_WILL		{251};	# I will use option
-sub TELNET_SB		{250};	# interpret as subnegotiation
-sub TELNET_GA		{249};	# you may reverse the line
-sub TELNET_EL		{248};	# erase the current line
-sub TELNET_EC		{247};	# erase the current character
-sub TELNET_AYT		{246};	# are you there
-sub TELNET_AO		{245};	# abort output--but let prog finish
-sub TELNET_IP		{244};	# interrupt process--permanently
-sub TELNET_BREAK	{243};	# break
-sub TELNET_DM		{242};	# data mark--for connect. cleaning
-sub TELNET_NOP		{241};	# nop
-sub TELNET_SE		{240};	# end sub negotiation
-sub TELNET_EOR		{239};	# end of record (transparent mode)
-sub TELNET_ABORT	{238};	# Abort process
-sub TELNET_SUSP		{237};	# Suspend process
-sub TELNET_EOF		{236};	# End of file: EOF is already used...
-sub TELNET_SYNCH	{242};	# for telfunc calls
+sub TELOPT_BINARY ()	      {0}; # Binary Transmission
+sub TELOPT_ECHO ()	      {1}; # Echo
+sub TELOPT_RCP ()	      {2}; # Reconnection
+sub TELOPT_SGA ()	      {3}; # Suppress Go Ahead
+sub TELOPT_NAMS ()	      {4}; # Approx Message Size Negotiation
+sub TELOPT_STATUS ()	      {5}; # Status
+sub TELOPT_TM ()	      {6}; # Timing Mark
+sub TELOPT_RCTE ()	      {7}; # Remote Controlled Trans and Echo
+sub TELOPT_NAOL ()	      {8}; # Output Line Width
+sub TELOPT_NAOP ()	      {9}; # Output Page Size
+sub TELOPT_NAOCRD ()	     {10}; # Output Carriage-Return Disposition
+sub TELOPT_NAOHTS ()	     {11}; # Output Horizontal Tab Stops
+sub TELOPT_NAOHTD ()	     {12}; # Output Horizontal Tab Disposition
+sub TELOPT_NAOFFD ()	     {13}; # Output Formfeed Disposition
+sub TELOPT_NAOVTS ()	     {14}; # Output Vertical Tabstops
+sub TELOPT_NAOVTD ()	     {15}; # Output Vertical Tab Disposition
+sub TELOPT_NAOLFD ()	     {16}; # Output Linefeed Disposition
+sub TELOPT_XASCII ()	     {17}; # Extended ASCII
+sub TELOPT_LOGOUT ()	     {18}; # Logout
+sub TELOPT_BM ()	     {19}; # Byte Macro
+sub TELOPT_DET ()	     {20}; # Data Entry Terminal
+sub TELOPT_SUPDUP ()	     {21}; # SUPDUP
+sub TELOPT_SUPDUPOUTPUT ()   {22}; # SUPDUP Output
+sub TELOPT_SNDLOC ()	     {23}; # Send Location
+sub TELOPT_TTYPE ()	     {24}; # Terminal Type
+sub TELOPT_EOR ()	     {25}; # End of Record
+sub TELOPT_TUID ()	     {26}; # TACACS User Identification
+sub TELOPT_OUTMRK ()	     {27}; # Output Marking
+sub TELOPT_TTYLOC ()	     {28}; # Terminal Location Number
+sub TELOPT_3270REGIME ()     {29}; # Telnet 3270 Regime
+sub TELOPT_X3PAD ()	     {30}; # X.3 PAD
+sub TELOPT_NAWS ()	     {31}; # Negotiate About Window Size
+sub TELOPT_TSPEED ()	     {32}; # Terminal Speed
+sub TELOPT_LFLOW ()	     {33}; # Remote Flow Control
+sub TELOPT_LINEMODE ()	     {34}; # Linemode
+sub TELOPT_XDISPLOC ()	     {35}; # X Display Location
+sub TELOPT_OLD_ENVIRON ()    {36}; # Environment Option
+sub TELOPT_AUTHENTICATION () {37}; # Authentication Option
+sub TELOPT_ENCRYPT ()	     {38}; # Encryption Option
+sub TELOPT_NEW_ENVIRON ()    {39}; # New Environment Option
+sub TELOPT_EXOPL ()	    {255}; # Extended-Options-List
 
-sub TELOPT_BINARY	  {0};	# 8-bit data path
-sub TELOPT_ECHO		  {1};	# echo
-sub TELOPT_RCP		  {2};	# prepare to reconnect
-sub TELOPT_SGA		  {3};	# suppress go ahead
-sub TELOPT_NAMS		  {4};	# approximate message size
-sub TELOPT_STATUS	  {5};	# give status
-sub TELOPT_TM		  {6};	# timing mark
-sub TELOPT_RCTE		  {7};	# remote controlled transmission and echo
-sub TELOPT_NAOL		  {8};	# negotiate about output line width
-sub TELOPT_NAOP		  {9};	# negotiate about output page size
-sub TELOPT_NAOCRD	  {10}; # negotiate about CR disposition
-sub TELOPT_NAOHTS	  {11}; # negotiate about horizontal tabstops
-sub TELOPT_NAOHTD	  {12}; # negotiate about horizontal tab disposition
-sub TELOPT_NAOFFD	  {13}; # negotiate about formfeed disposition
-sub TELOPT_NAOVTS	  {14}; # negotiate about vertical tab stops
-sub TELOPT_NAOVTD	  {15}; # negotiate about vertical tab disposition
-sub TELOPT_NAOLFD	  {16}; # negotiate about output LF disposition
-sub TELOPT_XASCII	  {17}; # extended ascic character set
-sub TELOPT_LOGOUT	  {18}; # force logout
-sub TELOPT_BM		  {19}; # byte macro
-sub TELOPT_DET		  {20}; # data entry terminal
-sub TELOPT_SUPDUP	  {21}; # supdup protocol
-sub TELOPT_SUPDUPOUTPUT	  {22}; # supdup output
-sub TELOPT_SNDLOC	  {23}; # send location
-sub TELOPT_TTYPE	  {24}; # terminal type
-sub TELOPT_EOR		  {25}; # end or record
-sub TELOPT_TUID		  {26}; # TACACS user identification
-sub TELOPT_OUTMRK	  {27}; # output marking
-sub TELOPT_TTYLOC	  {28}; # terminal location number
-sub TELOPT_3270REGIME	  {29}; # 3270 regime
-sub TELOPT_X3PAD	  {30}; # X.3 PAD
-sub TELOPT_NAWS		  {31}; # window size
-sub TELOPT_TSPEED	  {32}; # terminal speed
-sub TELOPT_LFLOW	  {33}; # remote flow control
-sub TELOPT_LINEMODE	  {34}; # Linemode option
-sub TELOPT_XDISPLOC	  {35}; # X Display Location
-sub TELOPT_OLD_ENVIRON	  {36}; # Old - Environment variables
-sub TELOPT_AUTHENTICATION {37}; # Authenticate
-sub TELOPT_ENCRYPT	  {38}; # Encryption option
-sub TELOPT_NEW_ENVIRON	  {39}; # New - Environment variables
-sub TELOPT_EXOPL	 {255}; # extended-options-list
-
-sub SLC_SYNCH		   {1};
-sub SLC_BRK		   {2};
-sub SLC_IP		   {3};
-sub SLC_AO		   {4};
-sub SLC_AYT		   {5};
-sub SLC_EOR		   {6};
-sub SLC_ABORT		   {7};
-sub SLC_EOF		   {8};
-sub SLC_SUSP		   {9};
-sub SLC_EC		  {10};
-sub SLC_EL		  {11};
-sub SLC_EW		  {12};
-sub SLC_RP		  {13};
-sub SLC_LNEXT		  {14};
-sub SLC_XON		  {15};
-sub SLC_XOFF		  {16};
-sub SLC_FORW1		  {17};
-sub SLC_FORW2		  {18};
 
 1;
 __END__;
 
 
-########################### Documentation ############################
+######################## User Documentation ##########################
 
+
+## To format the following user documentation into a more readable
+## format, use one of these programs: pod2man; pod2html; pod2text.
 
 =head1 NAME
 
@@ -2061,35 +2749,22 @@ Net::Telnet - interact with TELNET port or other TCP ports
 
 =head1 SYNOPSIS
 
-    use Net::Telnet ();
-    see METHODS section below
+C<use Net::Telnet ();>
+
+see METHODS section below
 
 =head1 DESCRIPTION
 
 Net::Telnet allows you to make client connections to a TCP port and do
-network I/O, especially with a port using the TELNET protocol.  Simple
+network I/O, especially to a port using the TELNET protocol.  Simple
 I/O methods such as print, get, and getline are provided.  More
 sophisticated interactive features are provided because connecting to
 a TELNET port ultimately means communicating with a program designed
-for human interaction.  Some interactive features include the ability
+for human interaction.  These interactive features include the ability
 to specify a timeout and to wait for patterns to appear in the input
-stream, such as the prompt from a command interpreter.
+stream, such as the prompt from a shell.
 
-This example prints who's logged-on to the remote host sparky:
-
-    $sparky = new Net::Telnet (Host => "sparky",
-                               Timeout => 10,
-                               Prompt => '/[$%#>] $/');
-    $sparky->login($username, $passwd);
-    @lines = $sparky->cmd("/usr/bin/who");
-    print @lines;
-    $sparky->close;
-
-Methods B<login()> and B<cmd()> use the prompt setting in the object
-to determine when a login or command is complete.  If the prompt
-doesn't match, it's likely those commands will timeout.
-
-Other reasons to use this class than strictly with a TELNET port are:
+Other reasons to use this module than strictly with a TELNET port are:
 
 =over 2
 
@@ -2111,37 +2786,118 @@ appear.
 
 =back
 
-B<Please note> some important differences with most other Perl I/O
-calls.  All input is buffered, while all output is flushed.  The
-output record separator for B<print()> is set to B<\n> by default, so
-there's no need to append all your commands with a newline.  See
-B<output_record_separator()> to change the default.  In the input
-stream, each sequence of B<\r\n> is converted to B<\n>.  In the output
-stream, each occurrence of B<\n> is converted to a sequence of
-B<\r\n>.  See B<binmode()> to change the default.  TCP protocols
-typically use the ASCII sequence I<carriage-return> I<newline> to
-designate a newline.
+Here's an example that prints who's logged-on to the remote host
+sparky.  In addition to a username and password, you must also know
+the user's shell prompt, which for this example is C<bash$>
+
+    use Net::Telnet ();
+    $t = new Net::Telnet (Timeout => 10,
+                          Prompt => '/bash\$ $/');
+    $t->open("sparky");
+    $t->login($username, $passwd);
+    @lines = $t->cmd("/usr/bin/who");
+    print @lines;
+
+More examples are in the B<EXAMPLES> section below.
+
+=head2 What To Know Before Using
+
+=over 2
+
+=item *
+
+All output is flushed while all input is buffered.  Each object
+contains an input buffer.
+
+=item *
+
+The output record separator for C<print()> and C<cmd()> is set to
+C<"\n"> by default, so that you don't have to append all your commands
+with a newline.  See C<output_record_separator()> to change the
+behavior.
+
+=item *
+
+The methods C<login()> and C<cmd()> use the I<prompt> setting in the
+object to determine when a login or remote command is complete.  The
+method will fail with a time-out if you don't set the prompt
+correctly.
+
+=item *
+
+To avoid unexpected backslash interpretation, always use single quotes
+instead of double quotes to construct a match operator argument for
+C<prompt()> and C<waitfor()> (e.g. C<'/bash\$ $/'>).  If you're
+constructing a DOS like file path, you'll need to use four backslashes
+to represent one (e.g. C<'/c:\\\\users\\\\billE<gt>$/i'>).
+
+Of course don't forget about regexp metacharacters like C<.>, C<[>, or
+C<$>.  You'll only need a single backslash to quote them.  The anchor
+metacharacters C<^> and C<$> refer to positions in the input buffer.
+
+=item *
+
+Errors such as timing-out are handled according to the I<errmode>
+action.  The default action is to print an error message to standard
+error and have the program die.  Use C<errmode()> to change the
+action.
+
+Using an I<errmode> of C<"return"> arranges for the error message to
+be saved and the offending method to return with an undefined value.
+You can obtain the error message using C<errmsg()>.
+
+=item *
 
 You'll need to be running at least Perl version 5.002 to use this
 module.  This module does not require any libraries that don't already
-come with the standard Perl distribution.  If you have the IO::
-libraries then methods are inherited from the class IO::Socket::INET,
-otherwise FileHandle is used as a base class.
+come with a standard Perl distribution.
 
-Special methods are provided to handle errors.  Normally when an error
-or timeout is encountered using a telnet object, the program dies with
-an error message printed to standard error.  You may arrange for the
-methods to return with an undefined value instead by using
-B<errmode()> or the B<errmode> option to B<new()>.  See B<errmode()>
-for other sophisticated error mode settings.  The error message itself
-may be obtained using the B<errmsg()>.
+If you have the IO:: libraries installed then IO::Socket::INET is used
+as a base class, otherwise FileHandle is used.  The IO:: libraries now
+come standard starting with perl5.004.
 
-Note that I<eof> is not considered an error while I<timing-out> is.
+=item *
 
-While debugging your program use B<input_log()> or B<dump_log()> to
-see what's actually being received and sent.
+In the input stream, each sequence of I<carriage return> and I<line
+feed> (i.e. C<"\015\012"> or CR LF) is converted to C<"\n">.  In the
+output stream, each occurrence of C<"\n"> is converted to a sequence
+of CR LF.  See C<binmode()> to change the behavior.  TCP protocols
+typically use the ASCII sequence, carriage return and line feed to
+designate a newline.
 
-Two different styles of named arguments are supported.  This document
+=item *
+
+Timing-out while making a connection is disabled for machines that
+don't support the C<alarm()> function.  Most notably these include
+Win32 machines.
+
+More universal support for connection time-outs will be in a later
+release.
+
+=item *
+
+This is an alpha version - meaning that the interface may change in
+future versions.  Contact me, Jay Rogers <jay@rgrs.com>, if you find
+any bugs or have suggestions for improvement.
+
+=back
+
+=head2 Debugging
+
+The typical bug causes a timeout error because you've made incorrect
+assumptions about what the remote side actually sends.  The easiest
+way to reconcile what the remote side sends with your expectations is
+to use C<input_log()> or C<dump_log()>.
+
+C<dump_log()> allows you to see the data being sent from the remote
+side before any translation is done, while C<input_log()> shows you
+the results after translation.  The translation includes converting
+end of line characters and stripping and responding to TELNET protocol
+commands.
+
+=head2 Style of Named Parameters
+
+Two different styles of named parameters are supported.  This document
 only shows the IO:: style:
 
     Net::Telnet->new(Timeout => 20);
@@ -2150,25 +2906,36 @@ however the dash-option style is also allowed:
 
     Net::Telnet->new(-timeout => 20);
 
-For more help, see the B<EXAMPLES> section below.
+=head2 Connecting to a Remote Win32 Machine
 
-This is an alpha version - meaning that the interface may change in
-future versions.  Contact me, Jay Rogers <jay@rgrs.com>, if you find
-any bugs or have suggestions for improvement.
+By default, Windows machines don't come with a TELNET service.
+However, third party TELNET servers can be acquired to provide access
+to a DOS shell.  As is all too familiar, many of these servers are of
+inferior quality.
+
+One particularly nasty problem is a server that sends ANSI terminal
+escape sequences despite being told not to.  These escape sequences
+make your job of parsing the data much more difficult.  You can
+sometimes avoid this with a server that prompts you for I<console
+mode>.  Choose I<no> to console mode.
 
 
 =head1 METHODS
 
 
-=head2 new - create a new Net::Telnet object
+=over 4
+
+=item B<new> - create a new Net::Telnet object
 
     $obj = Net::Telnet->new([Binmode    => $mode,]
+                            [Cmd_remove_mode => $mode,]
                             [Dump_Log   => $filename,]
                             [Errmode    => $errmode,]
                             [Fhopen     => $filehandle,]
                             [Host       => $host,]
                             [Input_log  => $file,]
                             [Input_record_separator => $char,]
+                            [Option_log => $file,]
                             [Output_log => $file,]
                             [Output_record_separator => $char,]
                             [Port       => $port,]
@@ -2178,101 +2945,154 @@ any bugs or have suggestions for improvement.
 
 This is the constructor for Net::Telnet objects.  A new object is
 returned on success, the I<$errmode> action is performed on failure -
-see B<errmode()>.  The arguments are short-cuts to methods of the same
+see C<errmode()>.  The arguments are short-cuts to methods of the same
 name.
 
 If the I<$host> argument is given then the object is opened by
-connecting to TCP I<$port> on I<$host>.  Also see B<open()>.  The new
+connecting to TCP I<$port> on I<$host>.  Also see C<open()>.  The new
 object returned is given the following defaults in the absence of
 corresponding named arguments:
 
-=over 2
+=over 4
 
-=item *
+=item
 
-The default B<host> is B<"localhost">
+The default I<Host> is C<"localhost">
 
-=item *
+=item
 
-The default B<port> is B<23>
+The default I<Port> is C<23>
 
-=item *
+=item
 
-The default B<prompt> is B<'/[$%#>>B<] $/'>
+The default I<Prompt> is C<'/[\$%#E<gt>] $/'>
 
-=item *
+=item
 
-The default B<timeout> is B<10>
+The default I<Timeout> is C<10>
 
-=item *
+=item
 
-The default B<errmode> is B<'die'>
+The default I<Errmode> is C<"die">
 
-=item *
+=item
 
-The default B<output_record_separator> is B<"\n">
+The default I<Output_record_separator> is C<"\n">
 
-=item *
+=item
 
-The default B<input_record_separator> is B<"\n">
+The default I<Input_record_separator> is C<"\n">
 
-=item *
+=item
 
-The default B<binmode> is B<0>, which means do newline translations
+The default I<Binmode> is C<0>, which means do newline translation
+
+=item
+
+The default I<Cmd_remove_mode> is C<"auto">.
 
 =back
 
-=head2 binmode - turn off/on newline translation
+=back
+
+
+=over 4
+
+=item B<binmode> - toggle newline translation
+
+    $mode = $obj->binmode;
 
     $prev = $obj->binmode($mode);
 
-This method controls whether or not sequences of B<\r\n> are
-translated.  By default they are translated (i.e. binmode is I<off>).
+This method controls whether or not sequences of carriage returns and
+line feeds (CR LF or more specifically C<"\015\012">) are translated.
+By default they are translated (i.e. binmode is C<0>).
 
-If I<$mode> is missing or B<1> then binmode is I<on> and newline
-translation is not done.
+If no argument is given, the current mode is returned.
 
-If I<$mode> is B<0> then binmode is I<off> and newline translation is
-done.  In the input stream, each sequence of B<\r\n> is converted to
-B<\n> and in the output stream, each occurrence of B<\n> is converted
-to a sequence of B<\r\n>.
+If I<$mode> is C<1> then binmode is I<on> and newline translation is
+not done.
+
+If I<$mode> is C<0> then binmode is I<off> and newline translation is
+done.  In the input stream, each sequence of CR LF is converted to
+C<"\n"> and in the output stream, each occurrence of C<"\n"> is
+converted to a sequence of CR LF.
 
 Note that input is always buffered.  Changing binmode doesn't effect
 what's already been read into the buffer.  Output is not buffered and
 changing binmode will have an immediate effect.
 
+=back
 
-=head2 break - send TELNET break character
+
+=over 4
+
+=item B<break> - send TELNET break character
 
     $ok = $obj->break;
 
 This method sends the TELNET break character.  This character is
-provided because it's a signal outside the USASCII set which is
-currently given local meaning within many systems.  It's intended to
-indicate that the Break Key or the Attention Key was hit.
+provided because it's a signal outside the USASCII character set which
+is currently given local meaning within many systems.  It's intended
+to indicate that the Break Key or the Attention Key was hit.
+
+=back
 
 
-=head2 close - close object
+=over 4
+
+=item B<buffer> - scalar reference to object's input buffer
+
+    $ref = $obj->buffer;
+
+This method returns a scalar reference to the input buffer for
+I<$obj>.  Data in the input buffer is data that has been read from the
+remote side but has yet to be read by the user.  Modifications to the
+input buffer are returned by a subsequent read.
+
+=back
+
+
+=over 4
+
+=item B<buffer_empty> - discard all data in object's input buffer
+
+    $obj->buffer_empty;
+
+This method removes all data in the input buffer for I<$obj>.
+
+=back
+
+
+=over 4
+
+=item B<close> - close object
 
     $ok = $obj->close;
 
 This method closes the socket, file, or pipe associated with the
 object.
 
+=back
 
-=head2 cmd - issue command and retrieve output
+
+=over 4
+
+=item B<cmd> - issue command and retrieve output
 
     $ok = $obj->cmd($string);
     $ok = $obj->cmd(String   => $string,
                     [Output  => $ref,]
                     [Prompt  => $match,]
-                    [Timeout => $secs,]);
+                    [Timeout => $secs,]
+                    [Cmd_remove_mode => $mode,]);
 
     @output = $obj->cmd($string);
-    @output = $obj->cmd(String  => $string,
+    @output = $obj->cmd(String   => $string,
                         [Output  => $ref,]
                         [Prompt  => $match,]
-                        [Timeout => $secs,]);
+                        [Timeout => $secs,]
+                        [Cmd_remove_mode => $mode,]);
 
 This method sends the command I<$string>, and reads the characters
 sent back by the command up until and including the matching prompt.
@@ -2282,26 +3102,67 @@ command prompting interpreter such as a shell.
 In a scalar context the characters read are discarded and a boolean is
 returned indicating the success or failure of sending the command
 string and reading the prompt.  Note that in order to return on error,
-B<errmode()> must not be set to I<die>.
+C<errmode()> must not be set to C<"die">.
 
 In an array context, just the output generated by the command is
 returned, one line per element.  In other words, all the characters in
 between the echoed back command string and the prompt are returned.
 If the command happens to return no output, an array containing one
 element, the null string is returned.  This is so the array will
-indicate I<true> in a boolean context.
+indicate true in a boolean context.
+
+Many command interpreters echo back the command sent.  In most
+situations, this method removes the first line returned from the
+remote side (i.e. the echoed back command).  See C<cmd_remove_mode()>
+for more control over this feature.
+
+Use C<dump_log()> to debug when this method keeps timing-out and you
+don't think it should.
 
 Optional named arguments are provided to override the current settings
-of prompt and timeout.
+of prompt, timeout, and cmd_remove_mode.
 
-The B<output> named argument provides an alternative method of
-receiving command output.  If you pass a scalar reference, the output
-is returned in the referenced scalar.  If you pass an array or hash
-reference, the lines of output are returned in the referenced array or
-hash.
+The I<Output> named argument provides an alternative method of
+receiving command output.  If you pass a scalar reference, all the
+output (even if it contains multiple lines) is returned in the
+referenced scalar.  If you pass an array or hash reference, the lines
+of output are returned in the referenced array or hash.
+
+=back
 
 
-=head2 dump_log - log all I/O in dump format
+=over 4
+
+=item B<cmd_remove_mode> - toggle removal of echoed commands
+
+    $mode = $obj->cmd_remove_mode;
+
+    $prev = $obj->cmd_remove_mode($mode);
+
+This method controls how to deal with echoed back commands in the
+output returned by cmd().  Typically, when you send a command to the
+remote side, the first line of output returned is the command echoed
+back.  Use this mode to remove the first line of output normally
+returned by cmd().
+
+If no argument is given, the current mode is returned.
+
+If I<$mode> is C<0> then the command output returned from cmd() has no
+lines removed.  If I<$mode> is a positive integer, then the first
+I<$mode> lines of command output are stripped.
+
+By default, I<$mode> is set to C<"auto">.  Auto means that whether or
+not the first line of command output is stripped, depends on whether
+or not the remote side offered to echo.  By default, Net::Telnet
+always accepts an offer to echo by the remote side.  You can change
+the default to reject such an offer using C<option_accept()>.
+
+=back
+
+
+=over 4
+
+=item B<dump_log> - log all I/O in dump format
 
     $fh = $obj->dump_log;
 
@@ -2313,7 +3174,7 @@ This method starts or stops dump format logging of all the object's
 input and output.  The dump format shows the blocks read and written
 in a hexadecimal and printable character format.  This method is
 useful when debugging, however you might want to first try
-B<input_log()> as it's more readable.
+C<input_log()> as it's more readable.
 
 If no argument is given, the current log filehandle is returned.  A
 null string indicates logging is off.
@@ -2324,8 +3185,12 @@ If an open filehandle is given, it is used for logging and returned.
 Otherwise, the argument is assumed to be the name of a file, the file
 is opened and a filehandle to it is returned.
 
+=back
 
-=head2 eof - end of file read indicator
+
+=over 4
+
+=item B<eof> - end of file indicator
 
     $eof = $obj->eof;
 
@@ -2335,8 +3200,12 @@ words I<$obj> can be closed but there still can be stuff in the buffer
 to be read.  Under this condition you can still read but you won't be
 able to write.
 
+=back
 
-=head2 errmode - set action to perform on error
+
+=over 4
+
+=item B<errmode> -  define action to be performed on error
 
     $mode = $obj->errmode;
 
@@ -2345,17 +3214,17 @@ able to write.
 This method gets or sets the action used when errors are encountered
 using the object.  The first calling sequence returns the current
 error mode.  The second calling sequence sets it to I<$mode> and
-returns the previous mode.  Valid values for I<$mode> are B<die> (the
-default), B<return>, a I<coderef>, or an I<arrayref>.
+returns the previous mode.  Valid values for I<$mode> are C<"die">
+(the default), C<"return">, a I<coderef>, or an I<arrayref>.
 
-When mode is B<die> then when an error is encountered using the
-object, the program dies and an error message is printed on standard
-error.
+When mode is C<"die"> and an error is encountered using the object,
+then an error message is printed to standard error and the program
+dies.
 
-When mode is B<return> then the method generating the error places an
-error message in the object and returns the undefined value in a
+When mode is C<"return"> then the method generating the error places
+an error message in the object and returns the undefined value in a
 scalar context and a null list in list context.  The error message may
-be obtained using B<errmsg()>.
+be obtained using C<errmsg()>.
 
 When mode is a I<coderef>, then when an error is encountered
 I<coderef> is called with the error message as its first argument.
@@ -2370,8 +3239,12 @@ arguments.  Using this mode you may have your own subroutine handle
 errors.  If the I<coderef> itself returns then the method generating
 the error returns undefined or a null list depending on context.
 
+=back
 
-=head2 errmsg - most recent error message
+
+=over 4
+
+=item B<errmsg> - most recent error message
 
     $msg = $obj->errmsg;
 
@@ -2384,14 +3257,18 @@ for the object to the concatenation of I<@msgs> and returns the
 previous error message.  Normally, error messages are set internally
 by a method when an error is encountered.
 
+=back
 
-=head2 error - perform the error mode action
+
+=over 4
+
+=item B<error> - perform the error mode action
 
     $obj->error(@msgs);
 
 This method concatenates I<@msgs> into a string and places it in the
-object as the error message.  Also see B<errmsg()>.  It then performs
-the error mode.  Also see B<errmode()>.
+object as the error message.  Also see C<errmsg()>.  It then performs
+the error mode.  Also see C<errmode()>.
 
 If the error mode doesn't cause the program to die then the undefined
 value or a null list is returned depending on context.
@@ -2399,22 +3276,30 @@ value or a null list is returned depending on context.
 This method is primarily used by this class or a sub-class to perform
 the user requested action when an error is encountered.
 
+=back
 
-=head2 fhopen - use an existing open filehandle
+
+=over 4
+
+=item B<fhopen> - use already open filehandle for I/O
 
     $ok = $obj->fhopen($fh);
 
-This method associates the open filehandle I<$fh> with the object for
-further I/O.
+This method associates the open filehandle I<$fh> with I<$obj> for
+further I/O.  Filehandle I<$fh> must already be opened.
 
-This method provides a way to use this module with a filehandle that's
-already opened.  Suppose you want to use the features of this module
-to do I/O to something other than a TCP port.  Instead of opening the
-object for I/O to a TCP port by passing a B<host> arg to B<new()> or
-invoking B<open()>, call this method instead.
+Suppose you want to use the features of this module to do I/O to
+something other than a TCP port, for example STDIN or a filehandle
+opened to read from a process.  Instead of opening the object for I/O
+to a TCP port by using C<open()> or C<new()>, call this method
+instead.
+
+=back
 
 
-=head2 get - read block of data
+=over 4
+
+=item B<get> - read block of data
 
     $data = $obj->get([Timeout => $secs,]);
 
@@ -2422,46 +3307,69 @@ This method reads a block of data from the object and returns it along
 with any buffered data.  If no buffered data is available to return,
 it will wait for data to read using the timeout specified in the
 object.  You can override that timeout using I<$secs>.  Also see
-B<timeout()>.  If buffered data is available to return, it also checks
+C<timeout()>.  If buffered data is available to return, it also checks
 for a block of data that can be immediately read.
 
-On eof an undefined value is returned.  On timeout or other errors the
-error mode action is performed.
+On eof an undefined value is returned.  On time-out or other errors
+the error mode action is performed.
+
+An undefined value is returned for both eof and time-out when
+I<errmode> is not set to C<"die">.  Use C<eof()> and C<timed_out()> to
+distinguish.
+
+=back
 
 
-=head2 getline - read next line
+=over 4
+
+=item B<getline> - read next line
 
     $line = $obj->getline([Timeout => $secs,]);
 
 This method reads and returns the next line of data from the object.
-You can use B<input_record_separator()> to change the notion of what
-separates a line.  The default is B<\n>.
+You can use C<input_record_separator()> to change the notion of what
+separates a line.  The default is C<"\n">.
 
 If a line isn't immediately available, this method blocks waiting for
 a line or the timeout.  You can override the object's timeout for this
-method using I<$secs>.  Also see B<timeout()>.
+method using I<$secs>.  Also see C<timeout()>.
 
 On eof an undefined value is returned.  On timeout or other errors the
 error mode action is performed.
 
+An undefined value is returned for both eof and time-out when
+I<errmode> is not set to C<"die">.  Use C<eof()> and C<timed_out()> to
+distinguish.
 
-=head2 getlines - read next lines
+=back
+
+
+=over 4
+
+=item B<getlines> - read next lines
 
     @lines = $obj->getlines([Timeout => $secs,]);
 
 This method reads and returns the next available lines of data from
-the object.  You can use B<input_record_separator()> to change the
-notion of what separates a line.  The default is B<\n>.
+the object.  You can use C<input_record_separator()> to change the
+notion of what separates a line.  The default is C<"\n">.
 
 If a line isn't immediately available, this method blocks waiting for
 one or more lines, or the timeout.  You can override the object's
-timeout for this method using I<$secs>.  Also see B<timeout()>.
+timeout for this method using I<$secs>.  Also see C<timeout()>.
 
 On eof a null array is returned.  On timeout or other errors the error
 mode action is performed.
 
+A null array is returned for both eof and time-out when I<errmode> is
+not set to C<"die">.  Use C<eof()> and C<timed_out()> to distinguish.
 
-=head2 host - name of remote host
+=back
+
+
+=over 4
+
+=item B<host> - name of remote host
 
     $host = $obj->host;
 
@@ -2473,8 +3381,12 @@ sets the current host name to I<$host> and returns the previous host
 name.  You may indicate the remote host using either a hostname or an
 IP address.
 
+=back
 
-=head2 input_log - log all input
+
+=over 4
+
+=item B<input_log> - log all input
 
     $fh = $obj->input_log;
 
@@ -2483,10 +3395,10 @@ IP address.
     $fh = $obj->input_log($filename);
 
 This method starts or stops logging of input.  This is useful when
-debugging.  Also see B<dump_log()>.  Because most command interpreters
+debugging.  Also see C<dump_log()>.  Because most command interpreters
 echo back commands received, its likely all your output will also be
 in this log.  Note that input logging occurs after newline
-translation.  See B<binmode()> for details on newline translation.
+translation.  See C<binmode()> for details on newline translation.
 
 If no argument is given, the log filehandle is returned.  A null
 string indicates logging is off.
@@ -2497,23 +3409,31 @@ If an open filehandle is given, it is used for logging and returned.
 Otherwise, the argument is assumed to be the name of a file, the file
 is opened for logging and a filehandle to it is returned.
 
+=back
 
-=head2 input_record_separator - input line delimiter
+
+=over 4
+
+=item B<input_record_separator> - input line delimiter
 
     $rs = $obj->input_record_separator;
 
     $prev = $obj->input_record_separator($rs);
 
 This method designates the line delimiter for input.  It's used with
-B<getline()>, B<getlines()>, and B<cmd()> to determine lines in the
+C<getline()>, C<getlines()>, and C<cmd()> to determine lines in the
 input.
 
 With no argument this method returns the current input record
 separator set in the object.  With an argument it sets the input
 record separator to I<$rs> and returns the previous value.
 
+=back
 
-=head2 lastline - the lastline read
+
+=over 4
+
+=item B<lastline> - last line read
 
     $line = $obj->lastline;
 
@@ -2529,8 +3449,12 @@ object.  With an argument it sets the last line read to I<$line> and
 returns the previous value.  Normally, only internal methods set the
 last line.
 
+=back
 
-=head2 login - perform standard login
+
+=over 4
+
+=item B<login> - perform standard login
 
     $ok = $obj->login($username, $password);
 
@@ -2539,11 +3463,12 @@ last line.
                       [Prompt  => $match,]
                       [Timeout => $secs,]);
 
-This method performs a standard login by waiting for a login prompt and
-responding with I<$username>, then waiting for the password prompt and
-responding with I<$password>, and then waiting for the command
-interpreter prompt.  If any of the prompts sent don't match what's
-expected, the method will timeout - unless timeout is turned off.
+This method performs a standard login by waiting for a login prompt
+and responding with I<$username>, then waiting for the password prompt
+and responding with I<$password>, and then waiting for the command
+interpreter prompt.  If any of those prompts sent by the remote side
+don't match what's expected, this method will timeout - unless timeout
+is turned off.
 
 Login prompts must match either of the patterns:
 
@@ -2554,14 +3479,21 @@ Password prompts must match the pattern:
 
     /password[: ]*$/i
 
-The command interpreter prompt must match the current value of
-B<prompt()>.
+The command interpreter prompt must match the current setting of
+prompt.
+
+Use C<dump_log()> to debug when this method keeps timing-out and you
+don't think it should.
 
 Optional named arguments are provided to override the current settings
 of prompt and timeout.
 
+=back
 
-=head2 max_buffer_length - maximum size of input buffer
+
+=over 4
+
+=item B<max_buffer_length> - maximum size of input buffer
 
     $len = $obj->max_buffer_length;
 
@@ -2570,16 +3502,20 @@ of prompt and timeout.
 This method designates the maximum size of the input buffer.  An error
 is generated when a read causes the buffer to exceed this limit.  The
 default value is 1,048,576 bytes (1MB).  The input buffer can grow
-much larger than the block size when you read using B<getline()> or
-B<waitfor()> and the data stream contains no newlines or matching
-waitfor patterns.
+much larger than the block size when you continuously read using
+C<getline()> or C<waitfor()> and the data stream contains no newlines
+or matching waitfor patterns.
 
 With no argument this method returns the current maximum buffer length
 set in the object.  With an argument it sets the maximum buffer length
 to I<$len> and returns the previous value.
 
+=back
 
-=head2 open - connect to host and port
+
+=over 4
+
+=item B<open> - connect to port on remote host
 
     $ok = $obj->open($host);
 
@@ -2588,27 +3524,334 @@ to I<$len> and returns the previous value.
                      [Timeout => $secs,]);
 
 This method opens a TCP connection to I<$port> on I<$host>.  If either
-argument is missing then the current value of B<host()> or B<port()>
-is used.
+argument is missing then the current value of C<host()> or C<port()>
+is used.  An optional named argument is provided to override the
+current setting of timeout.
 
-An optional named argument is provided to override the current setting
-of timeout.
+On time-out or other connection errors, the error mode action is
+performed.
 
 Timeouts don't work for this method on machines that don't implement
-SIGALRM.  For those machines, an error is returned when the system
-reaches its own time-out while trying to connect.
+SIGALRM - most notably Win32 machines.  For those machines, an error
+is returned when the system reaches its own time-out while trying to
+connect.
 
 A side effect of this method is to reset the alarm interval associated
 with SIGALRM.
 
+=back
 
-=head2 output_field_separator - field separator for print
+
+=over 4
+
+=item B<option_accept> - indicate willingness to accept a TELNET option
+
+    $fh = $obj->option_accept([Do   => $telopt,]
+                              [Dont => $telopt,]
+                              [Will => $telopt,]
+                              [Wont => $telopt,]);
+
+This method is used to indicate whether to accept or reject an offer
+to enable a TELNET option made by the remote side.  If you're using
+I<Do> or I<Will> to indicate a willingness to enable, then a
+notification callback must have already been defined by a prior call
+to C<option_callback()>.  See C<option_callback()> for details on
+receiving enable/disable notification of a TELNET option.
+
+You can give multiple I<Do>, I<Dont>, I<Will>, or I<Wont> arguments
+for different TELNET options in the same call to this method.
+
+The following example describes the meaning of the named arguments.  A
+TELNET option, such as C<TELOPT_ECHO> used below, is an integer
+constant that you can import from Net::Telnet.  See the source in file
+Telnet.pm for the complete list.
+
+=over 4
+
+=item
+
+I<Do> => C<TELOPT_ECHO>
+
+=over 4
+
+=item
+
+we'll accept an offer to enable the echo option on the local side
+
+=back
+
+=item
+
+I<Dont> => C<TELOPT_ECHO>
+
+=over 4
+
+=item
+
+we'll reject an offer to enable the echo option on the local side
+
+=back
+
+=item
+
+I<Will> => C<TELOPT_ECHO>
+
+=over 4
+
+=item
+
+we'll accept an offer to enable the echo option on the remote side
+
+=back
+
+=item
+
+I<Wont> => C<TELOPT_ECHO>
+
+=over 4
+
+=item
+
+we'll reject an offer to enable the echo option on the remote side
+
+=back
+
+=back
+
+=item
+
+Use C<option_send()> to send a request to the remote side to enable or
+disable a particular TELNET option.
+
+=back
+
+
+=over 4
+
+=item B<option_callback> - define the option negotiation callback
+
+    $coderef = $obj->option_callback;
+
+    $prev = $obj->option_callback($coderef);
+
+This method defines the callback subroutine that's called when a
+TELNET option is enabled or disabled.  Once defined, the
+I<option_callback> may not be undefined.  However, calling this method
+with a different I<$coderef> changes it.
+
+Here are the circumstances that invoke I<$coderef>:
+
+=over 4
+
+=item
+
+An option becomes enabled because the remote side requested an enable
+and C<option_accept()> had been used to arrange that it be accepted.
+
+=item
+
+The remote side arbitrarily decides to disable an option that is
+currently enabled.  Note that Net::Telnet always accepts a request to
+disable from the remote side.
+
+=item
+
+C<option_send()> was used to send a request to enable or disable an
+option and the response from the remote side has just been received.
+Note, that if a request to enable is rejected then I<$coderef> is
+still invoked even though the option didn't change.
+
+=back
+
+=item
+
+Here are the arguments passed to I<&$coderef>:
+
+    &$coderef($obj, $option, $is_remote,
+              $is_enabled, $was_enabled, $buf_position);
+
+=over 4
+
+=item
+
+1.  I<$obj> is the Net::Telnet object
+
+=item
+
+2.  I<$option> is the TELNET option.  Net::Telnet exports constants
+for the various TELNET options which just equate to an integer.
+
+=item
+
+3.  I<$is_remote> is a boolean indicating for which side the option
+applies.
+
+=item
+
+4.  I<$is_enabled> is a boolean indicating the option is enabled or
+disabled
+
+=item
+
+5.  I<$was_enabled> is a boolean indicating the option was previously
+enabled or disabled
+
+=item
+
+6.  I<$buf_position> is an integer indicating the position in the
+object's input buffer where the option takes effect.  See C<buffer()>
+to access the object's input buffer.
+
+=back
+
+=back
+
+
+=over 4
+
+=item B<option_log> - log all TELNET options sent or received
+
+    $fh = $obj->option_log;
+
+    $fh = $obj->option_log($fh);
+
+    $fh = $obj->option_log($filename);
+
+This method starts or stops logging of all TELNET options being sent
+or received.  This is useful for debugging when you send options via
+C<option_send()> or you arrange to accept option requests from the
+remote side via C<option_accept()>.  Also see C<dump_log()>.
+
+If no argument is given, the log filehandle is returned.  A null
+string indicates logging is off.
+
+To stop logging, use a null string as an argument.
+
+If an open filehandle is given, it is used for logging and returned.
+Otherwise, the argument is assumed to be the name of a file, the file
+is opened for logging and a filehandle to it is returned.
+
+=back
+
+
+=over 4
+
+=item B<option_send> - send TELNET option negotiation request
+
+    $ok = $obj->option_send([Do    => $telopt,]
+                            [Dont  => $telopt,]
+                            [Will  => $telopt,]
+                            [Wont  => $telopt,]
+                            [Async => $boolean,]);
+
+This method is not yet implemented.  Look for it in a future version.
+
+=back
+
+
+=over 4
+
+=item B<option_state> - get current state of a TELNET option
+
+    $hashref = $obj->option_state($telopt);
+
+This method returns a hashref containing a copy of the current state
+of TELNET option I<$telopt>.
+
+Here are the values returned in the hash:
+
+=over 4
+
+=item
+
+I<$hashref>->{remote_enabled}
+
+=over 4
+
+=item
+
+boolean that indicates if the option is enabled on the remote side.
+
+=back
+
+=item
+
+I<$hashref>->{remote_enable_ok}
+
+=over 4
+
+=item
+
+boolean that indicates if it's ok to accept an offer to enable this
+option on the remote side.
+
+=back
+
+=item
+
+I<$hashref>->{remote_state}
+
+=over 4
+
+=item
+
+string used to hold the internal state of option negotiation for this
+option on the remote side.
+
+=back
+
+=item
+
+I<$hashref>->{local_enabled}
+
+=over 4
+
+=item
+
+boolean that indicates if the option is enabled on the local side.
+
+=back
+
+=item
+
+I<$hashref>->{local_enable_ok}
+
+=over 4
+
+=item
+
+boolean that indicates if it's ok to accept an offer to enable this
+option on the local side.
+
+=back
+
+=item
+
+I<$hashref>->{local_state}
+
+=over 4
+
+=item
+
+string used to hold the internal state of option negotiation for this
+option on the local side.
+
+=back
+
+=back
+
+=back
+
+
+=over 4
+
+=item B<output_field_separator> - field separator for print
 
     $ofs = $obj->output_field_separator;
 
     $prev = $obj->output_field_separator($ofs);
 
-This method designates the output field separator for B<print()>.
+This method designates the output field separator for C<print()>.
 Ordinarily the print method simply prints out the comma separated
 fields you specify.  Set this to specify what's printed between
 fields.
@@ -2617,8 +3860,12 @@ With no argument this method returns the current output field
 separator set in the object.  With an argument it sets the output
 field separator to I<$ofs> and returns the previous value.
 
+=back
 
-=head2 output_log - log all output
+
+=over 4
+
+=item B<output_log> - log all output
 
     $fh = $obj->output_log;
 
@@ -2627,10 +3874,10 @@ field separator to I<$ofs> and returns the previous value.
     $fh = $obj->output_log($filename);
 
 This method starts or stops logging of output.  This is useful when
-debugging.  Also see B<dump_log()>.  Because most command interpreters
+debugging.  Also see C<dump_log()>.  Because most command interpreters
 echo back commands received, its likely all your output would also be
-in an input log.  See B<input_log()>.  Note that output logging occurs
-before newline translation.  See B<binmode()> for details on newline
+in an input log.  See C<input_log()>.  Note that output logging occurs
+before newline translation.  See C<binmode()> for details on newline
 translation.
 
 If no argument is given, the log filehandle is returned.  A null
@@ -2642,28 +3889,36 @@ If an open filehandle is given, it is used for logging and returned.
 Otherwise, the argument is assumed to be the name of a file, the file
 is opened for logging and a filehandle to it is returned.
 
+=back
 
-=head2 output_record_separator - output line delimiter
+
+=over 4
+
+=item B<output_record_separator> - output line delimiter
 
     $ors = $obj->output_record_separator;
 
     $prev = $obj->output_record_separator($ors);
 
-This method designates the output record separator for B<print()>.
+This method designates the output record separator for C<print()>.
 Ordinarily the print operator simply prints out the comma separated
 fields you specify, with no trailing newline or record separator
 assumed.  Set this variable to specify what's printed at the end of
 the print.
 
-Note: the output record separator is set to B<\n> by default, so
+Note: the output record separator is set to C<"\n"> by default, so
 there's no need to append all your commands with a newline.
 
 With no argument this method returns the current output record
 separator set in the object.  With an argument it sets the output
 record separator to I<$ors> and returns the previous value.
 
+=back
 
-=head2 port - remote port
+
+=over 4
+
+=item B<port> - remote port
 
     $port = $obj->port;
 
@@ -2673,10 +3928,14 @@ This method designates the remote TCP port.  With no argument this
 method returns the current port number.  With an argument it sets the
 current port number to I<$port> and returns the previous port.  If
 I<$port> is a service name, then first it's converted to a port number
-using the perl function B<getservbyname()>.
+using the perl function C<getservbyname()>.
+
+=back
 
 
-=head2 print - write to object
+=over 4
+
+=item B<print> - write to object
 
     $ok = $obj->print(@list);
 
@@ -2684,26 +3943,34 @@ This method prints a string or a comma-separated list of strings to
 the opened object and returns non-zero if all data was successfully
 written.
 
-By default, the B<output_record_separator()> is set to B<\n> in order
+By default, the C<output_record_separator()> is set to C<"\n"> in order
 to have your commands automatically end with a newline.  In most cases
 your output is being read by a command interpreter which won't accept
 a command until newline is read.  This is similar to someone typing a
 command and hitting the return key.
 
 On failure, it's possible that some data was written.  If you choose
-to try and recover from a print timing-out, use B<print_length()> to
-determine how much was written before timeout occurred.
+to try and recover from a print timing-out, use C<print_length()> to
+determine how much was written before time-out occurred.
+
+=back
 
 
-=head2 print_length - number of bytes written by print
+=over 4
+
+=item B<print_length> - number of bytes written by print
 
     $num = $obj->print_length;
 
 This returns the number of bytes successfully written by the most
-recent B<print()>.
+recent C<print()>.
+
+=back
 
 
-=head2 prompt - pattern to match a prompt
+=over 4
+
+=item B<prompt> - pattern to match a prompt
 
     $matchop = $obj->prompt;
 
@@ -2711,36 +3978,53 @@ recent B<print()>.
 
 This method sets the pattern used to find a prompt in the input
 stream.  It must be a string representing a valid perl pattern match
-operator.  The methods B<login()> and B<cmd()> try to read until
-matching the prompt.  If the pattern chosen doesn't match what's
-sent, then it's likely those commands will timeout.
+operator.  The methods C<login()> and C<cmd()> try to read until
+matching the prompt.  They will fail with a time-out error if the
+pattern you've chosen doesn't match what the remote side sends.
 
 With no argument this method returns the prompt set in the object.
 With an argument it sets the prompt to I<$matchop> and returns the
 previous value.
 
-The default prompt is '/[$%#>] $/'
+The default prompt is C<'/[\$%#E<gt>] $/'>
 
-Always use single quotes to construct I<$matchop> to avoid unintended
-backslash interpretation.  Using single quotes, you only need add
-extra backslashes to quote patterns containing B<\'> or B<\\>.
+Always use single quotes, instead of double quotes, to construct
+I<$matchop> (e.g. C<'/bash\$ $/'>).  If you're constructing a DOS like
+file path, you'll need to use four backslashes to represent one
+(e.g. C<'/c:\\\\users\\\\billE<gt>$/i'>).
+
+Of course don't forget about regexp metacharacters like C<.>, C<[>, or
+C<$>.  You'll only need a single backslash to quote them.  The anchor
+metacharacters C<^> and C<$> refer to positions in the input buffer.
+
+=back
 
 
-=head2 telnetmode - turn off/on telnet command interpretation
+=over 4
 
-    $prev = $obj->telnet($mode);
+=item B<telnetmode> - turn off/on telnet command interpretation
 
-This method controls whether or not telnet commands in the data stream
-are recognized and handled.  The telnet protocol uses certain
+    $mode = $obj->telnetmode;
+
+    $prev = $obj->telnetmode($mode);
+
+This method controls whether or not TELNET commands in the data stream
+are recognized and handled.  The TELNET protocol uses certain
 character sequences sent in the data stream to control the session.
-If the port you're connecting to isn't using the telnet protocol, then
+If the port you're connecting to isn't using the TELNET protocol, then
 you should turn this mode off.  The default is I<on>.
 
-If I<$mode> is B<0> then telnet mode is off.  If I<$mode> is missing
-or B<1> then telnet mode is on.
+If no argument is given, the current mode is returned.
+
+If I<$mode> is C<0> then telnet mode is off.  If I<$mode> is C<1> then
+telnet mode is on.
+
+=back
 
 
-=head2 timed_out - timeout indicator
+=over 4
+
+=item B<timed_out> - time-out indicator
 
     $boolean = $obj->timed_out;
 
@@ -2749,11 +4033,15 @@ or B<1> then telnet mode is on.
 This method indicates if a previous read or write method timed-out.
 
 With no argument this method returns true if a previous method
-timed-out.  With an argument it sets the indicator.  Generally this is
-used by internal methods to clear it.
+timed-out.  With an argument it sets the indicator.  Normally, only
+internal methods set this indicator.
+
+=back
 
 
-=head2 timeout - I/O timeout interval
+=over 4
+
+=item B<timeout> - I/O time-out interval
 
     $secs = $obj->timeout;
 
@@ -2767,10 +4055,10 @@ performed.
 The timeout may be expressed as a relative or absolute value.  If
 I<$secs> is greater than or equal to the time the program was started,
 as determined by $^T, then it's the absolute time when timeout occurs.
-Also see the perl function B<time()>.  A relative timeout happens
+Also see the perl function C<time()>.  A relative timeout happens
 I<$secs> from when the I/O method begins.
 
-If I<$secs> is B<0> then timeout occurs if the data cannot be
+If I<$secs> is C<0> then timeout occurs if the data cannot be
 immediately read or written.  Use the undefined value to turn off
 timing-out.
 
@@ -2778,8 +4066,12 @@ With no argument this method returns the timeout set in the object.
 With an argument it sets the timeout to I<$secs> and returns the
 previous value.
 
+=back
 
-=head2 watchfor - wait for pattern in the input
+
+=over 4
+
+=item B<waitfor> - wait for pattern in the input
 
     $ok = $obj->waitfor($matchop);
     $ok = $obj->waitfor([Match   => $matchop,]
@@ -2793,40 +4085,55 @@ previous value.
 
 This method reads until a pattern match or string is found in the
 input stream.  All the characters before and including the match are
-removed from the input stream.  On eof an undefined value is returned.
-On timeout or other errors the error mode action is performed.
+removed from the input stream.  On time-out, eof, or other errors the
+error mode action is performed.
 
 In an array context the characters before the match and the matched
 characters are returned in I<$prematch> and I<$match>.
 
 You can specify more than one pattern or string by simply providing
-multiple B<Match> and/or B<String> named arguments.  A I<$matchop>
-must be a string representing a valid perl pattern match operator.
+multiple I<Match> and/or I<String> named arguments.  A I<$matchop>
+must be a string representing a valid Perl pattern match operator.
 The I<$string> is just a substring to find in the input stream.
+
+Use C<dump_log()> to debug when this method keeps timing-out and you
+don't think it should.
 
 An optional named argument is provided to override the current setting
 of timeout.
 
-Always use single quotes to construct I<$matchop> to avoid unintended
-backslash interpretation.  Using single quotes, you only need add
-extra backslashes to quote patterns containing B<\'> or B<\\>.
+To avoid unexpected backslash interpretation, always use single quotes
+instead of double quotes to construct a match operator argument for
+C<prompt()> and C<waitfor()> (e.g. C<'/bash\$ $/'>).  If you're
+constructing a DOS like file path, you'll need to use four backslashes
+to represent one (e.g. C<'/c:\\\\users\\\\billE<gt>$/i'>).
+
+Of course don't forget about regexp metacharacters like C<.>, C<[>, or
+C<$>.  You'll only need a single backslash to quote them.  The anchor
+metacharacters C<^> and C<$> refer to positions in the input buffer.
+
+=back
 
 
 =head1 SEE ALSO
 
 =over 2
 
-=item *
+=item RFC 854
 
-RFC 854 - TELNET Protocol Specification
+S<TELNET Protocol Specification>
 
-=item *
+S<ftp://ftp.isi.edu/in-notes/rfc854.txt>
 
-RFC 1143 - The Q Method of Implementing TELNET Option Negotiation
+=item RFC 1143
 
-=item *
+S<Q Method of Implementing TELNET Option Negotiation>
 
-TELNET Options
+S<ftp://ftp.isi.edu/in-notes/rfc1143.txt>
+
+=item TELNET Option Assignments
+
+S<ftp://ftp.isi.edu/in-notes/iana/assignments/telnet-options>
 
 =back
 
@@ -2835,17 +4142,18 @@ TELNET Options
 
 This example gets the current weather forecast for Brainerd, Minnesota.
 
-    use Net::Telnet ();
     my($forecast, $t);
 
-    $t = new Net::Telnet (-host => "rainmaker.wunderground.com");
+    use Net::Telnet ();
+    $t = new Net::Telnet;
+    $t->open("rainmaker.wunderground.com");
 
     ## Wait for first prompt and "hit return".
     $t->waitfor('/continue:.*$/');
     $t->print("");
 
     ## Wait for second prompt and respond with city code.
-    $t->waitfor('/city code:.*$/');
+    $t->waitfor('/city code.*$/');
     $t->print("BRD");
 
     ## Read and print the first page of forecast.
@@ -2857,16 +4165,17 @@ This example gets the current weather forecast for Brainerd, Minnesota.
 
 This example checks a POP server to see if you have mail.
 
-    use Net::Telnet ();
     my($hostname, $line, $passwd, $pop, $username);
 
     $hostname = "your_destination_host_here";
     $username = "your_username_here";
     $passwd = "your_password_here";
 
-    $pop = new Net::Telnet (-host => $hostname,
-			    -port => 110,
-			    -telnetmode => '');
+    use Net::Telnet ();
+    $pop = new Net::Telnet (Telnetmode => 0);
+    $pop->open(Host => $hostname,
+               Port => 110);
+
 
     ## Read connection message.
     $line = $pop->getline;
@@ -2897,7 +4206,6 @@ put in raw mode using the Bourne shell.  The Bourne shell is used
 because some shells, notably tcsh, prevent changing tty modes.  Upon
 completion, FTP style statistics are printed to stderr.
 
-    use Net::Telnet;
     my($block, $filename, $host, $hostname, $k_per_sec, $line,
        $num_read, $passwd, $prevblock, $prompt, $size, $size_bsd,
        $size_sysv, $start_time, $total_time, $username);
@@ -2908,9 +4216,10 @@ completion, FTP style statistics are printed to stderr.
     $filename = "your_download_file_here";
 
     ## Connect and login.
-    $host = new Net::Telnet (Host => $hostname,
-                             Timeout => 30,
+    use Net::Telnet ();
+    $host = new Net::Telnet (Timeout => 30,
                              Prompt => '/[%#>] $/');
+    $host->open($hostname);
     $host->login($username, $passwd);
 
     ## Make sure prompt won't match anything in send data.
@@ -2933,7 +4242,7 @@ completion, FTP style statistics are printed to stderr.
 
     ## Start sending the file.
     binmode STDOUT;
-    $host->binmode;
+    $host->binmode(1);
     $host->print("/usr/bin/sh -c 'stty raw; cat $filename'");
     $host->getline;    # discard echoed back line
 
@@ -2980,7 +4289,6 @@ filehandle to the pseudo-terminal.  This example sends some
 initial commands and then allows the user to type commands
 to the telnet session.
 
-    use Net::Telnet;
     my($comm_pty, $host, $hostname, $passwd, $pty,
        $username, @lines);
 
@@ -3013,14 +4321,16 @@ to the telnet session.
     ## program.  The "Telnetmode" is "off" because we're
     ## not talking directly to a telnet port as we normally
     ## do, we're talking to a pseudo-terminal.  The
-    ## "Output_record_separator" is now a carriage-return
+    ## "Output_record_separator" is now a carriage return
     ## because that's what you'd normally hit when you get
     ## done typing a line at a terminal.
+    use Net::Telnet ();
     $host = new Net::Telnet (Fhopen => $pty,
                              Timeout => 10,
-                             Prompt => '/[%#>] $/',
+                             Prompt => '/[\$%#>] $/',
+                             Output_record_separator => "\r",
                              Telnetmode => 0,
-                             Output_record_separator => "\r");
+                             Cmd_remove_mode => 1);
 
     ## Issue some commands.
     $host->login($username, $passwd);
@@ -3045,7 +4355,7 @@ to the telnet session.
 
 =head1 AUTHOR
 
-Jay Rogers <jay@rgrs.com>
+Jay Rogers E<lt>jay@rgrs.comE<gt>
 
 
 =head1 COPYRIGHT
