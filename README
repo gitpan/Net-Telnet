@@ -1,9 +1,9 @@
 
-                      Net::Telnet, version 3.01
+                      Net::Telnet, version 3.02
 
-    Copyright (c) 1997 Jay Rogers.  All rights reserved.  This program
-    is free software; you can redistribute it and/or modify it under
-    the same terms as Perl itself.
+    Copyright (c) 1997, 2000 Jay Rogers.  All rights reserved.
+    This program is free software; you can redistribute it and/or
+    modify it under the same terms as Perl itself.
 
 
   What's In It For You
@@ -58,7 +58,7 @@
 
     Here's an example that prints who's logged-on to the remote host
     sparky.  In addition to a username and password, you must also
-    know the user's shell prompt, which for this example is bash$
+    know the user's shell prompt, which for this example it's bash$
 
         use Net::Telnet ();
         $t = new Net::Telnet (Timeout => 10,
@@ -68,11 +68,14 @@
         @lines = $t->cmd("/usr/bin/who");
         print @lines;
 
-    See the user documentation for more examples.
+    See the user documentation for more examples.  Also see the user
+    documentation for the section "What To Know Before Using".
 
-    This is an alpha version - meaning that the interface may change
-    in future versions.  Contact me, Jay Rogers <jay@rgrs.com>, if you
-    find any bugs or have suggestions for improvement.
+    Usage questions should be directed to the Usenet newsgroup
+    comp.lang.perl.modules.
+
+    Contact me, Jay Rogers <jay@rgrs.com>, if you find any bugs
+    or have suggestions for improvement.
 
 
   Documentation
@@ -82,6 +85,13 @@
     source (i.e. the .pm file).  Installing using "make install"
     places this documentation in a man page in the perl library under
     the directory "man/man3".
+
+    To nicely format the documentation for printing, you may use
+    "groff" to convert to postscript.  Groff is available under
+    the GNU General Public License (GPL) and is installed on most
+    Linux machines.
+
+        pod2man Net/Telnet.pm | groff -man -Tps > Net::Telnet.ps
 
 
   Installation
@@ -102,7 +112,9 @@
     b.  To install into a private library, for example your home
         directory:
 
-            perl Makefile.PL INSTALLSITELIB=$HOME/lib INSTALLMAN3DIR=$HOME/man
+            perl Makefile.PL \
+                 INSTALLSITELIB=$HOME/lib/perl \
+                 INSTALLMAN3DIR=$HOME/lib/perl/man/man3
             make
             make test
             make pure_install
@@ -115,4 +127,4 @@
 --
 Jay Rogers
 jay@rgrs.com
-December 27, 1997
+May 27, 2000

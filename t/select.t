@@ -1,62 +1,45 @@
 #!./perl
 
 use strict;
-use lib '.';
-use Net::Telnet ();
+require 5.002;
 
-## Global variables.
-use vars qw($T);
+## Main program.
+{
+    my (
+	$bitmask,
+	$nfound,
+	);
 
-## Local variables.
-my(
-   $count,
-   $test,
-   $tests,
-   $total,
-   );
+    print "1..3\n";
 
-## Get the tests to run.
-$tests = &init_tests();
+    ## Does this OS support sockets?
+    use Socket qw(AF_INET SOCK_STREAM);
+    test (socket SOCK, AF_INET, SOCK_STREAM, 0);
 
-## Print total number of tests.
-$total = @$tests;
-print "1..$total\n";
+    ## Does this OS support select()?
+    vec($bitmask='', fileno(SOCK), 1) = 1;
+    eval { $nfound = select($bitmask, '', '', 0) };
+    test ($@ eq "");
 
-## Do each test.
-$count = 1;
-foreach $test (@$tests) {
-    if (&$test) {
-	print "ok $count\n";
-    }
-    else {
-	print "not ok $count\n";
-    }
+    ## Did select() return a correct value?
+    test (defined($nfound) and $nfound == 0);
 
-    $count++;
-}
-	
-exit;
+    exit;
+} # end main program
 
 
-sub init_tests {
-    [
-     sub {
-	 my($nfound, $r);
+############################ Subroutines #############################
 
-	 ## Create a TCP socket.
-	 use Socket qw(AF_INET SOCK_STREAM);
-	 socket S, AF_INET, SOCK_STREAM, 0
-	     or return;
 
-	 ## Check for input on socket - it should return 0.
-	 vec($r='', fileno(S), 1) = 1;
-	 eval { $nfound = select($r, '', '', 0) };
+BEGIN {
+    my $testnum = 0;
 
-	 ## Check for failure.
-	 return if $@;
-	 return unless defined($nfound) and $nfound == 0;
-
-	 1;
-     },
-    ];
+    sub test {
+	if (defined($_[0]) and $_[0]) {
+	    print "ok ", ++$testnum, "\n";
+	}
+	else {
+	    print "not ok ", ++$testnum, "\n";
+	}
+    } # end sub test
 }
