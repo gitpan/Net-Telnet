@@ -22,7 +22,7 @@ require 5.002;
     test ($@ eq "");
 
     ## Did select() return a correct value?
-    test (defined($nfound) and $nfound == 0);
+    test (defined($nfound) and ($nfound == 0 or $nfound == 1));
 
     exit;
 } # end main program

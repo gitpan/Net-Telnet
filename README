@@ -1,7 +1,7 @@
 
-                      Net::Telnet, version 3.02
+                      Net::Telnet, version 3.03
 
-    Copyright (c) 1997, 2000 Jay Rogers.  All rights reserved.
+    Copyright (c) 1997, 2000, 2002 Jay Rogers.  All rights reserved.
     This program is free software; you can redistribute it and/or
     modify it under the same terms as Perl itself.
 
@@ -37,7 +37,7 @@
 
     .  Perl Version 5.002 or later
 
-    .  A Windows 95/NT machine requires Perl version 5.003_07 or later
+    .  A MS-Windows machine requires Perl version 5.003_07 or later
 
     .  No other modules are required that don't already come with a
        standard distribution of Perl.
@@ -65,7 +65,7 @@
                               Prompt => '/bash\$ $/');
         $t->open("sparky");
         $t->login($username, $passwd);
-        @lines = $t->cmd("/usr/bin/who");
+        @lines = $t->cmd("who");
         print @lines;
 
     See the user documentation for more examples.  Also see the user
@@ -127,4 +127,4 @@
 --
 Jay Rogers
 jay@rgrs.com
-May 27, 2000
+July 16, 2002
