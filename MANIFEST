@@ -4,3 +4,4 @@ Makefile.PL
 README
 lib/Net/Telnet.pm
 t/select.t
+META.yml                                 Module meta-data (added by MakeMaker)

@@ -1,9 +1,10 @@
 
-                      Net::Telnet, version 3.03
+                      Net::Telnet, version 3.04
 
-    Copyright (c) 1997, 2000, 2002 Jay Rogers.  All rights reserved.
-    This program is free software; you can redistribute it and/or
-    modify it under the same terms as Perl itself.
+    Copyright (c) 1997, 2000, 2002, 2013 Jay Rogers.  All rights
+    reserved.  This program is free software; you can
+    redistribute it and/or modify it under the same terms as Perl
+    itself.
 
 
   What's In It For You
@@ -127,4 +128,4 @@
 --
 Jay Rogers
 jay@rgrs.com
-July 16, 2002
+April 21, 2013

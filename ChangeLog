@@ -1,3 +1,36 @@
+2013-04-21  Jay Rogers  <jay@rgrs.com>
+
+	* Version 3.04 released.
+
+2012-12-15  Jay Rogers  <jay@rgrs.com>
+
+	* Telnet.pm (open family sockfamily): Added IPv6
+	support.  It is enabled using the method/parameter
+	family() and the installed Socket package version is
+	1.94+ (which corresponds with perl 5.14+).
+
+	* Telnet.pm (peerhost peerport sockhost sockport):
+	New methods to support IPv6, because the inherited
+	ones from IO::Socket::INET don't.
+
+	* Telnet.pm (open localhost localfamily): New
+	methods and open() parameters for binding to a local
+	network interface.
+
+	* Telnet.pm (dump_log, input_log, option_log, output_log): Fixed
+	so they turn off logging when passed an empty string arg.
+
+	* Telnet.pm (_fillbuf _put): Fixed to use
+	Errno::EINTR, when possible, to test for an
+	interrupted select(), sysread(), or syswrite().  The
+	test for $! =~ /^interrupted doesn't work when LANG
+	is not English.
+
+2002-12-17  Jay Rogers  <jay@rgrs.com>
+
+	* Telnet.pm (dump_log, input_log, option_log, output_log): Fixed
+	so they take a bare filehandle.
+
 2002-07-16  Jay Rogers  <jay@rgrs.com>
 
 	* Version 3.03 released.
