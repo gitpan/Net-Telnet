@@ -2913,20 +2913,26 @@ sub _io_socket_include {
     eval "require IO::Socket";
 } # end sub io_socket_include
 
-
 sub _is_open_fh {
     my ($fh) = @_;
     my $is_open = '';
     local $@;
 
     eval {
-	local $SIG{"__DIE__"} = "DEFAULT";
-	$is_open = defined(fileno $fh);
+        local $SIG{"__DIE__"} = "DEFAULT";
+        $is_open = defined(fileno $fh);
     };
+
+    if (!$is_open and $@) {  # fileno() failed
+        ## Check if filehandle is tied and printable.
+        eval {
+            local $SIG{"__DIE__"} = "DEFAULT";
+            $is_open = tied(*$fh) && $fh->can("print");
+        };
+    }
 
     $is_open;
 } # end sub _is_open_fh
-
 
 sub _log_dump {
     my ($direction, $fh, $data, $offset, $len) = @_;
